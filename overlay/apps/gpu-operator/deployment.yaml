@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-operator
+  labels:
+    app: gpu-operator
+    tier: addon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gpu-operator
+  template:
+    metadata:
+      labels:
+        app: gpu-operator
+        tier: addon
+    spec:
+      containers:
+        - name: gpu-operator
+          image: busybox:latest
+          command: ['sh', '-c', 'echo "gpu operator running" && sleep 3600']
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+            requests:
+              memory: "64Mi"
+              cpu: "50m"

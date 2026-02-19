@@ -1,0 +1,89 @@
+# ApplicationSet 1: Base apps — deployed to ALL clusters with location-specific overrides.
+#
+# Matrix combines:
+#   Generator 1 (git files): reads each cluster's config.yaml → produces cluster_name, location, cluster_server
+#   Generator 2 (git dirs):  scans location overlay apps using {{.location}} from Generator 1
+#
+# Result: every cluster gets every base app, rendered through its location's kustomize overlay.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: matrix-base-apps
+  namespace: argocd
+spec:
+  generators:
+    - matrix:
+        generators:
+          - git:
+              repoURL: https://github.com/ashtonian/argo-test.git
+              revision: HEAD
+              files:
+                - path: matrix/clusters/*/config.yaml
+          - git:
+              repoURL: https://github.com/ashtonian/argo-test.git
+              revision: HEAD
+              directories:
+                - path: 'matrix/locations/{{.location}}/apps/*'
+  goTemplate: true
+  template:
+    metadata:
+      name: '{{.cluster_name}}-{{.path.basename}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ashtonian/argo-test.git
+        targetRevision: HEAD
+        path: '{{.path.path}}'
+      destination:
+        server: '{{.cluster_server}}'
+        namespace: default
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+
+# ApplicationSet 2: Cluster-specific addons — deployed only where a cluster opts in.
+#
+# Matrix combines:
+#   Generator 1 (git files): reads each cluster's config.yaml → produces cluster_name, cluster_server
+#   Generator 2 (git dirs):  scans that cluster's addons/ directory using {{.cluster_name}}
+#
+# Result: only clusters with an addons/<app>/ directory get that app deployed.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: matrix-cluster-addons
+  namespace: argocd
+spec:
+  generators:
+    - matrix:
+        generators:
+          - git:
+              repoURL: https://github.com/ashtonian/argo-test.git
+              revision: HEAD
+              files:
+                - path: matrix/clusters/*/config.yaml
+          - git:
+              repoURL: https://github.com/ashtonian/argo-test.git
+              revision: HEAD
+              directories:
+                - path: 'matrix/clusters/{{.cluster_name}}/addons/*'
+  goTemplate: true
+  template:
+    metadata:
+      name: '{{.cluster_name}}-{{.path.basename}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ashtonian/argo-test.git
+        targetRevision: HEAD
+        path: '{{.path.path}}'
+      destination:
+        server: '{{.cluster_server}}'
+        namespace: default
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true

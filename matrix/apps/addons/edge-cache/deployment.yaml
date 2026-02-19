@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-cache
+  labels:
+    app: edge-cache
+    tier: addon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge-cache
+  template:
+    metadata:
+      labels:
+        app: edge-cache
+        tier: addon
+    spec:
+      containers:
+        - name: edge-cache
+          image: busybox:latest
+          command: ['sh', '-c', 'echo "edge cache running" && sleep 3600']
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+            requests:
+              memory: "64Mi"
+              cpu: "50m"

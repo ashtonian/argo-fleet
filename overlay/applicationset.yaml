@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: overlay-cluster-apps
+  namespace: argocd
+spec:
+  generators:
+    # Scans cluster overlay directories — each subdirectory becomes an Application.
+    # Apps not present in the cluster overlay simply don't get deployed.
+    - git:
+        repoURL: https://github.com/ashtonian/argo-test.git
+        revision: HEAD
+        directories:
+          - path: overlay/clusters/homelab/*
+  goTemplate: true
+  template:
+    metadata:
+      name: 'overlay-{{.path.basename}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ashtonian/argo-test.git
+        targetRevision: HEAD
+        path: '{{.path.path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: default
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true

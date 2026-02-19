@@ -1,0 +1,3 @@
+cluster_name: cluster-001
+location: us-east
+cluster_server: https://cluster-001.example.com
