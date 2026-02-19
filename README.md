@@ -10,14 +10,16 @@ Uses [crumbhole/argocd-lovely-plugin](https://github.com/crumbhole/argocd-lovely
 
 | | Overlay | Matrix | Lovely + Charmap |
 |---|---|---|---|
-| **Mechanism** | Git directory generator | Matrix generator + kustomize overlays per group | Matrix generator + CMP template substitution |
+| **Mechanism** | Git directory generator | Matrix generator + kustomize overlays per group | Simple directory generator + CMP template substitution |
 | **Base app selection** | Directory presence per cluster | Directory presence per group | All base apps auto-deploy to all clusters |
 | **Group overrides** | Manual per-cluster patches | Kustomize overlays shared per group | `<::VAR::>` template markers resolved at render time |
-| **Addon selection** | Directory presence per cluster | Directory presence per cluster | Directory presence per cluster |
+| **Addon selection** | Directory presence per cluster | Directory presence per cluster | Directory presence per group |
+| **Cluster identity** | Hardcoded per cluster | `config.yaml` per cluster | ArgoCD env vars (set at bootstrap) |
+| **Per-cluster git dirs** | N (one per app per cluster) | 1 (config.yaml + optional addons) | 0 |
 | **ApplicationSets** | 1 per cluster | 2 total | 2 total |
-| **Add a cluster** | Create N app overlay dirs | Create 1 `config.yaml` | Create 1 `config.yaml` |
+| **Add a cluster** | Create N app overlay dirs | Create 1 `config.yaml` | Bootstrap ArgoCD with env vars (no git change) |
 | **Add a base app** | Touch every cluster dir | Add 1 kustomization per group | Add 1 app dir (done) |
-| **Add a group** | N/A | Create group dir + N kustomizations | Set a value in config |
+| **Add a group** | N/A | Create group dir + N kustomizations | Create group dir + addon selection |
 | **Best for** | < 10 clusters | 10-100 clusters | 100+ clusters |
 
 ### Directory count at scale (3,000 clusters / 50 groups / 20 base apps / 5 addons)
@@ -25,11 +27,11 @@ Uses [crumbhole/argocd-lovely-plugin](https://github.com/crumbhole/argocd-lovely
 | | Overlay | Matrix | Lovely |
 |---|---|---|---|
 | Base app definitions | 20 | 20 | 20 |
-| Group overlay dirs | — | 50 x 20 = 1,000 | 0 |
-| Cluster config dirs | 3,000 x 20 = 60,000 | 3,000 | 3,000 |
-| Addon dirs (avg 2/cluster) | (included above) | 6,000 | 6,000 |
+| Group overlay dirs | — | 50 x 20 = 1,000 | — |
+| Cluster config dirs | 3,000 x 20 = 60,000 | 3,000 | 0 |
+| Addon dirs (avg 2/group) | (included above) | 6,000 | 50 x 2 = 100 |
 | ApplicationSets | 3,000 | 2 | 2 |
-| **Total** | **~63,000** | **~10,000** | **~9,000** |
+| **Total** | **~63,000** | **~10,000** | **~120** |
 
 ---
 
@@ -181,7 +183,9 @@ Only clusters with an `addons/<app>/` directory get that addon deployed.
 
 ## Approach 3: Lovely + Charmap (`lovely/`)
 
-Matrix generator with **argocd-lovely-plugin + charmap** for template variable substitution. Base app manifests contain `<::VAR::>` markers resolved at render time via `source.plugin.env` — **no per-group overlay directories needed**.
+**argocd-lovely-plugin + charmap** for template variable substitution. Each cluster runs its own ArgoCD instance with cluster identity (`CLUSTER_NAME`, `GROUP`, etc.) set as environment variables at bootstrap. Base app manifests contain `<::VAR::>` markers resolved at render time — **no per-cluster directories and no per-group overlay directories needed**.
+
+Since ArgoCD runs independently per cluster, the base app ApplicationSet is a simple directory generator — no matrix needed. Addons are selected at the group level.
 
 ### Structure
 
@@ -194,22 +198,24 @@ lovely/
 │   │   │   └── kustomization.yaml
 │   │   ├── ingress/
 │   │   └── logging/
-│   └── addons/
+│   └── addons/                        # Addon definitions
 │       ├── gpu-operator/
 │       └── edge-cache/
-├── clusters/
-│   ├── cluster-001/
-│   │   ├── config.yaml                # cluster_name, group, cluster_server
-│   │   └── addons/gpu-operator/
-│   ├── cluster-002/
-│   │   └── config.yaml
-│   └── cluster-003/
-│       ├── config.yaml
-│       └── addons/{gpu-operator,edge-cache}/
+├── groups/                            # Addon selection per group
+│   ├── us-east/
+│   │   └── addons/
+│   │       └── gpu-operator/
+│   │           └── kustomization.yaml # refs ../../../apps/addons/gpu-operator
+│   └── eu-west/
+│       └── addons/
+│           ├── gpu-operator/
+│           │   └── kustomization.yaml
+│           └── edge-cache/
+│               └── kustomization.yaml
 └── applicationsets.yaml
 ```
 
-No `groups/` directory. Group config is a value in each cluster's `config.yaml`, resolved by charmap at render time.
+No `clusters/` directory. Cluster identity comes from ArgoCD's own environment variables, set during cluster bootstrap (Terraform, Ansible, etc.). Adding a new cluster is a bootstrap operation — no git change required.
 
 ### Templated Manifests
 
@@ -238,35 +244,27 @@ spec:
 
 ```yaml
 generators:
-  - matrix:
-      generators:
-        - git:
-            files:
-              - path: lovely/clusters/*/config.yaml
-        - git:
-            directories:
-              - path: lovely/apps/base/*
-template:
-  spec:
-    source:
-      path: '{{.path.path}}'
-      plugin:
-        env:
-          - name: GROUP
-            value: '{{.group}}'
-          - name: CLUSTER_NAME
-            value: '{{.cluster_name}}'
+  - git:
+      directories:
+        - path: lovely/apps/base/*
 ```
 
-`source.plugin.env` passes ApplicationSet parameters as environment variables to the CMP. Charmap resolves `<::GROUP::>` → `us-east`, `<::CLUSTER_NAME::>` → `cluster-001`, etc.
+No matrix. No per-cluster config. Every ArgoCD instance deploys all base apps. Charmap resolves `<::GROUP::>`, `<::CLUSTER_NAME::>`, etc. from the env vars already configured on the ArgoCD repo-server.
 
-### ApplicationSet 2: Cluster Addons
+### ApplicationSet 2: Group Addons
 
-Same as Approach 2 — directory presence under `clusters/<name>/addons/`.
+```yaml
+generators:
+  - git:
+      directories:
+        - path: 'lovely/groups/<::GROUP::>/addons/*'
+```
+
+The `<::GROUP::>` in the ApplicationSet path is resolved by charmap from the ArgoCD instance's env. Each cluster's ArgoCD only sees addons for its own group.
 
 ### CMP Configuration
 
-One-time change to the ArgoCD repo-server CMP config to pass through the new variables:
+One-time change to the ArgoCD repo-server CMP config to pass through the cluster identity variables:
 
 ```sh
 charmap --mode flag \
@@ -274,17 +272,20 @@ charmap --mode flag \
   --set CLUSTER_NAME=${CLUSTER_NAME} \
 ```
 
+These env vars are set on the ArgoCD repo-server at cluster bootstrap time.
+
 ### Result
 
-Same 11 Applications as Approach 2, but with ~1,000 fewer overlay files.
+Each cluster deploys all base apps plus its group's addons. No per-cluster git state needed.
 
 ### Trade-offs
 
 | Pro | Con |
 |-----|-----|
-| Fewest files — no per-group overlay dirs | Requires argocd-lovely-plugin + charmap CMP |
-| Adding a group = set a value in config | String substitution only (no structural transforms) |
+| Near-zero git dirs — no per-cluster state | Requires argocd-lovely-plugin + charmap CMP |
+| Adding a cluster = bootstrap only, no git change | String substitution only (no structural transforms) |
 | Adding a base app = 1 dir, all clusters get it | CMP config must declare each passthrough variable |
+| Addon selection at group level scales to thousands | Per-cluster addon exceptions require additional mechanism |
 | Kustomize still available for structural changes | Harder to diff rendered output without running charmap |
 
 ---
