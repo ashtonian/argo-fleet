@@ -50,7 +50,7 @@ overlay/
 │   ├── gpu-operator/                  # Available but not deployed everywhere
 │   └── edge-cache/
 ├── clusters/
-│   └── homelab/                       # Only apps this cluster should run
+│   └── cluster-001/                       # Only apps this cluster should run
 │       ├── monitoring/
 │       │   └── kustomization.yaml     # refs ../../../apps/monitoring
 │       ├── ingress/
@@ -66,7 +66,7 @@ overlay/
 generators:
   - git:
       directories:
-        - path: overlay/clusters/homelab/*
+        - path: overlay/clusters/cluster-001/*
 ```
 
 Each cluster-app overlay is a `kustomization.yaml` referencing the base app. Can add patches per cluster. To add an app: create the directory. To remove: delete it (auto-sync prunes).

@@ -11,7 +11,7 @@ spec:
         repoURL: https://github.com/ashtonian/argo-test.git
         revision: HEAD
         directories:
-          - path: overlay/clusters/homelab/*
+          - path: overlay/clusters/cluster-001/*
   goTemplate: true
   template:
     metadata:
