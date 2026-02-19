@@ -8,8 +8,8 @@ patches:
       name: monitoring
     patch: |-
       - op: add
-        path: /metadata/labels/location
+        path: /metadata/labels/group
         value: eu-west
       - op: add
-        path: /spec/template/metadata/labels/location
+        path: /spec/template/metadata/labels/group
         value: eu-west

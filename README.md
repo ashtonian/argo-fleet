@@ -2,7 +2,7 @@
 
 Two approaches for managing app deployment across a large fleet of clusters using ArgoCD ApplicationSets and Kustomize overlays.
 
-**Goal:** Deploy a base set of apps to all clusters, apply per-location configuration overrides, and selectively deploy additional apps to specific clusters.
+**Goal:** Deploy a base set of apps to all clusters, apply per-group configuration overrides, and selectively deploy additional apps to specific clusters.
 
 ---
 
@@ -68,10 +68,10 @@ generators:
 
 ## Approach 2: Matrix (`matrix/`)
 
-Two ApplicationSets using the **matrix generator** to combine cluster identity with app discovery. Cluster config files provide parameters (location, server URL, etc.) that feed into the second generator's path templates.
+Two ApplicationSets using the **matrix generator** to combine cluster identity with app discovery. Cluster config files provide parameters (group, server URL, etc.) that feed into the second generator's path templates.
 
 This separates the problem into two layers:
-- **Base apps with location overrides** — every cluster gets these, rendered through its location's kustomize overlay
+- **Base apps with group overrides** — every cluster gets these, rendered through its group's kustomize overlay
 - **Cluster-specific addons** — only clusters that opt in (via directory presence) get these
 
 ### Structure
@@ -87,12 +87,12 @@ matrix/
 │       ├── gpu-operator/
 │       └── edge-cache/
 │
-├── locations/                         # Per-location kustomize overlays
+├── groups/                            # Per-group kustomize overlays
 │   ├── us-east/
-│   │   ├── config.yaml                # location: us-east
+│   │   ├── config.yaml                # group: us-east
 │   │   └── apps/
 │   │       ├── monitoring/
-│   │       │   └── kustomization.yaml # refs base + location patches
+│   │       │   └── kustomization.yaml # refs base + group patches
 │   │       ├── ingress/
 │   │       └── logging/
 │   └── eu-west/
@@ -104,7 +104,7 @@ matrix/
 │
 ├── clusters/                          # Per-cluster identity + addon selection
 │   ├── cluster-001/
-│   │   ├── config.yaml                # cluster_name, location, cluster_server
+│   │   ├── config.yaml                # cluster_name, group, cluster_server
 │   │   └── addons/
 │   │       └── gpu-operator/
 │   │           └── kustomization.yaml # refs ../../../../apps/addons/gpu-operator
@@ -121,18 +121,18 @@ matrix/
 
 ### Cluster Config
 
-Each cluster declares its identity and which location it belongs to:
+Each cluster declares its identity and which group it belongs to:
 
 ```yaml
 # clusters/cluster-001/config.yaml
 cluster_name: cluster-001
-location: us-east
+group: us-east
 cluster_server: https://cluster-001.example.com
 ```
 
-The `location` field links the cluster to its location overlay, which controls how base apps are configured.
+The `group` field links the cluster to its group overlay, which controls how base apps are configured for that cluster.
 
-### ApplicationSet 1: Base Apps (all clusters × location overlays)
+### ApplicationSet 1: Base Apps (all clusters × group overlays)
 
 ```yaml
 generators:
@@ -142,18 +142,18 @@ generators:
         - git:
             files:
               - path: matrix/clusters/*/config.yaml
-        # Generator 2: Find base apps for each cluster's location
-        # {{.location}} comes from Generator 1
+        # Generator 2: Find base apps for each cluster's group
+        # {{.group}} comes from Generator 1
         - git:
             directories:
-              - path: 'matrix/locations/{{.location}}/apps/*'
+              - path: 'matrix/groups/{{.group}}/apps/*'
 ```
 
 **Flow:**
-1. Generator 1 reads `clusters/*/config.yaml` → `{cluster_name: cluster-001, location: us-east, ...}`
-2. Generator 2 uses `{{.location}}` → scans `locations/us-east/apps/*` → finds `monitoring`, `ingress`, `logging`
+1. Generator 1 reads `clusters/*/config.yaml` → `{cluster_name: cluster-001, group: us-east, ...}`
+2. Generator 2 uses `{{.group}}` → scans `groups/us-east/apps/*` → finds `monitoring`, `ingress`, `logging`
 3. Matrix merges both parameter sets → generates `cluster-001-monitoring`, `cluster-001-ingress`, etc.
-4. Repeat for every cluster — each gets all base apps through its location's overlay
+4. Repeat for every cluster — each gets all base apps through its group's overlay
 
 ### ApplicationSet 2: Cluster Addons (selective per cluster)
 
@@ -181,8 +181,8 @@ generators:
 
 ### Generated Applications
 
-| Cluster | Base Apps | Addons | Location |
-|---------|-----------|--------|----------|
+| Cluster | Base Apps | Addons | Group |
+|---------|-----------|--------|-------|
 | cluster-001 | monitoring, ingress, logging | gpu-operator | us-east |
 | cluster-002 | monitoring, ingress, logging | _(none)_ | us-east |
 | cluster-003 | monitoring, ingress, logging | gpu-operator, edge-cache | eu-west |
@@ -195,9 +195,9 @@ generators:
 |-----|-----|
 | Single pair of ApplicationSets for all clusters | More indirection in the directory structure |
 | Cluster params injected from config files | Requires understanding of matrix generator mechanics |
-| Location overlays shared across clusters | Two levels of kustomize (location → base) |
+| Group overlays shared across clusters | Two levels of kustomize (group → base) |
 | Scales to thousands of clusters | Per-cluster addon directories still needed for selective apps |
-| Adding a cluster = one config.yaml | Location must exist before clusters can reference it |
+| Adding a cluster = one config.yaml | Group must exist before clusters can reference it |
 
 ---
 
@@ -207,17 +207,17 @@ generators:
 
 **Overlay:** Create `clusters/<name>/` with a kustomization for each desired app.
 
-**Matrix:** Create `clusters/<name>/config.yaml` with `cluster_name`, `location`, and `cluster_server`. All base apps auto-deploy via the location. Optionally add `addons/<app>/` for selective apps.
+**Matrix:** Create `clusters/<name>/config.yaml` with `cluster_name`, `group`, and `cluster_server`. All base apps auto-deploy via the group. Optionally add `addons/<app>/` for selective apps.
 
 ### Adding a New Base App
 
 **Overlay:** Create the app in `apps/`, then add an overlay directory to every cluster that needs it.
 
-**Matrix:** Create the app in `apps/base/`, then add a kustomization in each location's `apps/` directory. Every cluster in those locations automatically gets it.
+**Matrix:** Create the app in `apps/base/`, then add a kustomization in each group's `apps/` directory. Every cluster in those groups automatically gets it.
 
-### Adding a New Location
+### Adding a New Group
 
-**Matrix only:** Create `locations/<name>/config.yaml` and `locations/<name>/apps/` with kustomizations for each base app. Clusters referencing this location will use these overlays.
+**Matrix only:** Create `groups/<name>/config.yaml` and `groups/<name>/apps/` with kustomizations for each base app. Clusters referencing this group will use these overlays.
 
 ### Adding a New Addon
 
@@ -225,20 +225,20 @@ Both approaches: Create the addon in the apps directory, then add a kustomizatio
 
 ---
 
-## Location Overrides
+## Group Overrides
 
-Location overlays use standard kustomize to customize base apps per region. Common overrides:
+Group overlays use standard kustomize to customize base apps. Common overrides:
 
-- **Labels/annotations** — region tags, compliance markers
-- **Replicas** — scale differently per region
-- **Resource limits** — adjust for regional hardware profiles
-- **ConfigMap patches** — region-specific endpoints, DNS suffixes
+- **Labels/annotations** — group tags, compliance markers
+- **Replicas** — scale differently per group
+- **Resource limits** — adjust for hardware profiles
+- **ConfigMap patches** — group-specific endpoints, DNS suffixes
 - **Image overrides** — use regional registries
 
-Example location overlay:
+Example group overlay:
 
 ```yaml
-# locations/us-east/apps/monitoring/kustomization.yaml
+# groups/us-east/apps/monitoring/kustomization.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -249,9 +249,9 @@ patches:
       name: monitoring
     patch: |-
       - op: add
-        path: /metadata/labels/location
+        path: /metadata/labels/group
         value: us-east
       - op: add
-        path: /spec/template/metadata/labels/location
+        path: /spec/template/metadata/labels/group
         value: us-east
 ```
