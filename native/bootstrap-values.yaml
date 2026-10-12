@@ -1,0 +1,71 @@
+# Values for the argocd-apps chart: the fleet-bootstrap ApplicationSet and its
+# AppProject. The same on every cluster; install after Argo CD
+# (native/argocd-values.yaml) and the cluster's registration Secret:
+#
+#   helm install fleet-bootstrap argocd-apps --repo https://argoproj.github.io/argo-helm \
+#     --version 2.0.6 --namespace argocd --values native/bootstrap-values.yaml
+#
+# The ApplicationSet reads this cluster's registration Secret and installs
+# native/bootstrap at the revision in its fleet.ashtonian.dev/revision
+# annotation, so even the fleet's own definition follows the cluster's ring.
+#
+# Chart: https://github.com/argoproj/argo-helm/tree/main/charts/argocd-apps
+
+projects:
+  # fleet-bootstrap may only manage the fleet's AppProject and
+  # ApplicationSets in the argocd namespace.
+  fleet-bootstrap:
+    namespace: argocd
+    description: Installs the native fleet AppProject and ApplicationSets.
+    sourceRepos:
+      - https://github.com/ashtonian/argo-fleet.git
+    destinations:
+      - server: https://kubernetes.default.svc
+        namespace: argocd
+    namespaceResourceWhitelist:
+      - group: argoproj.io
+        kind: AppProject
+      - group: argoproj.io
+        kind: ApplicationSet
+
+applicationsets:
+  fleet-bootstrap:
+    namespace: argocd
+    goTemplate: true
+    goTemplateOptions: ["missingkey=error"]
+    syncPolicy:
+      applicationsSync: create-update
+      preserveResourcesOnDeletion: true
+    generators:
+      # This cluster's own registration Secret. Exactly one may carry the
+      # managed label: a second one fails generation on the duplicate name.
+      - clusters:
+          selector:
+            matchLabels:
+              fleet.ashtonian.dev/managed: "true"
+    template:
+      metadata:
+        name: fleet-bootstrap
+      spec:
+        project: fleet-bootstrap
+        source:
+          repoURL: https://github.com/ashtonian/argo-fleet.git
+          targetRevision: '{{ index .metadata.annotations "fleet.ashtonian.dev/revision" }}'
+          path: native/bootstrap
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: argocd
+        syncPolicy:
+          automated:
+            # Pruning an ApplicationSet deletes every Application it owns.
+            prune: false
+            selfHeal: true
+          retry:
+            limit: 5
+            backoff:
+              duration: 10s
+              factor: 2
+              maxDuration: 5m
+    templatePatch: |
+      {{- if not (index .metadata.annotations "fleet.ashtonian.dev/revision") }}{{ fail "cluster Secret has no fleet.ashtonian.dev/revision annotation" }}{{ end -}}
+      {}

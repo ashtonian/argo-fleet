@@ -1,0 +1,80 @@
+# The spec every fleet ApplicationSet shares, merged into each by
+# kustomization.yaml. Every value comes from the cluster generator, which reads
+# this cluster's registration Secret (native/identity): labels select,
+# annotations carry values.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: applicationset-common
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  # A generator that stops matching keeps its Applications and their
+  # resources: removing an application is a deliberate step.
+  syncPolicy:
+    applicationsSync: create-update
+    preserveResourcesOnDeletion: true
+  template:
+    spec:
+      project: fleet
+      source:
+        repoURL: https://github.com/ashtonian/argo-fleet.git
+        targetRevision: '{{ index .metadata.annotations "fleet.ashtonian.dev/revision" }}'
+        kustomize:
+          # identity generates the fleet-identity ConfigMap. The group's
+          # Component carries its overrides; every group needs one, so a
+          # misspelt group fails to render instead of getting none.
+          components:
+            - ../../../components/identity
+            - '../../../components/groups/{{ index .metadata.labels "fleet.ashtonian.dev/group" }}'
+          commonLabels:
+            fleet.ashtonian.dev/group: '{{ index .metadata.labels "fleet.ashtonian.dev/group" }}'
+            fleet.ashtonian.dev/cluster: "{{ .name }}"
+          # Label pods too, but never change a Deployment's immutable selector.
+          labelWithoutSelector: true
+          labelIncludeTemplates: true
+      destination:
+        server: "{{ .server }}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - PruneLast=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 5m
+  # Checks the cluster's identity, then fills fleet-identity with GROUP,
+  # CLUSTER_NAME and every values.fleet.ashtonian.dev/<KEY> annotation as
+  # <KEY>. A failed check fails generation, which changes nothing:
+  # missingkey=error does not cover a label or annotation read with index.
+  # The values are JSON-encoded, so no value can change the patch itself.
+  templatePatch: |
+    {{- $group := index .metadata.labels "fleet.ashtonian.dev/group" }}
+    {{- $revision := index .metadata.annotations "fleet.ashtonian.dev/revision" }}
+    {{- if not $group }}{{ fail "cluster Secret has no fleet.ashtonian.dev/group label" }}{{ end }}
+    {{- if not $revision }}{{ fail "cluster Secret has no fleet.ashtonian.dev/revision annotation" }}{{ end }}
+    {{- if not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$" .name) }}{{ fail (printf "cluster name %q is not a valid label value" .name) }}{{ end }}
+    {{- $values := dict "GROUP" $group "CLUSTER_NAME" .name }}
+    {{- range $key, $value := .metadata.annotations }}
+    {{- if hasPrefix "values.fleet.ashtonian.dev/" $key }}
+    {{- $name := trimPrefix "values.fleet.ashtonian.dev/" $key }}
+    {{- if hasKey $values $name }}{{ fail (printf "%s is reserved: GROUP and CLUSTER_NAME come from the group label and the cluster's name" $key) }}{{ end }}
+    {{- $_ := set $values $name $value }}
+    {{- end }}
+    {{- end }}
+    spec:
+      source:
+        kustomize:
+          patches:
+            - target:
+                kind: ConfigMap
+                name: fleet-identity
+              patch: |-
+                - op: add
+                  path: /data
+                  value: {{ toJson $values }}

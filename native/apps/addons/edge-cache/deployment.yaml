@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-cache
+  labels:
+    app: edge-cache
+    tier: addon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge-cache
+  template:
+    metadata:
+      labels:
+        app: edge-cache
+        tier: addon
+    spec:
+      containers:
+        - name: edge-cache
+          image: busybox:1.37
+          command: ['sh', '-c', 'echo "edge cache running in $FLEET_REGION" && sleep 3600']
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+          # The cluster's identity and values (fleet-identity), as FLEET_<KEY>.
+          envFrom:
+            - prefix: FLEET_
+              configMapRef:
+                name: fleet-identity
