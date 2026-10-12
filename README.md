@@ -14,14 +14,40 @@ on Kubernetes 1.36, argocd-lovely-plugin 2.0.0 and
 lovely approach into a kind cluster on every change; the overlay and matrix
 manifests are built and validated against Argo CD's schemas.
 
-### Which one?
+## Contents
+
+- [Which one?](#which-one)
+- [Approach 1: Overlay](#approach-1-overlay)
+- [Approach 2: Matrix](#approach-2-matrix)
+- [Approach 3: Lovely + charmap](#approach-3-lovely--charmap)
+  - [Prerequisites](#prerequisites)
+  - [Try it in kind](#try-it-in-kind)
+  - [Bootstrapping a cluster](#bootstrapping-a-cluster)
+  - [Configuration reference](#configuration-reference)
+  - [Using it in your own repository](#using-it-in-your-own-repository)
+  - [Day-2 operations](#day-2-operations)
+  - [Staged rollout and rollback](#staged-rollout-and-rollback)
+  - [The plugin sidecar image](#the-plugin-sidecar-image)
+  - [Troubleshooting](#troubleshooting)
+  - [Monitoring](#monitoring)
+  - [Upgrading](#upgrading)
+  - [Limitations](#limitations)
+- [Deletion safety](#deletion-safety)
+- [Scale](#scale)
+- [Security](#security)
+- [Group overrides](#group-overrides)
+- [CI](#ci)
+- [Repository layout](#repository-layout)
+
+## Which one?
 
 - **Overlay** for a handful of clusters that each need their own patches.
 - **Matrix** when one central Argo CD manages every cluster and groups
   need structural differences (replicas, resources, images).
 - **Lovely + charmap** when every cluster runs its own Argo CD: clusters
-  join with no Git change, identity can come from a secrets manager, and
-  each cluster runs one pinned commit, so changes roll out ring by ring.
+  join with no Git change, identity comes from the cluster (a secrets
+  manager, for example), and each cluster runs one pinned commit, so changes
+  roll out ring by ring.
 
 | | [Overlay](#approach-1-overlay) | [Matrix](#approach-2-matrix) | [Lovely + charmap](#approach-3-lovely--charmap) |
 |---|---|---|---|
@@ -29,11 +55,12 @@ manifests are built and validated against Argo CD's schemas.
 | **Mechanism** | Git directory generator over a per-cluster directory | Matrix of a per-cluster `config.yaml` and per-group Kustomize overlays | Git directory generators; cluster identity substituted into manifests by a Config Management Plugin |
 | **Cluster identity** | The cluster's directory path, set in its ApplicationSet | `matrix/clusters/<cluster>/config.yaml` | A `cluster-identity` Secret in the cluster (can come from a secrets manager) |
 | **Base applications** | Listed per cluster | All, through the cluster's group overlay | All |
-| **Group overrides** | Patches in each cluster's overlays | Kustomize overlay per group and application | `<::GROUP::>` tokens in manifests; Kustomize for structure |
+| **Group overrides** | Patches in each cluster's overlays | Kustomize overlay per group and application | `<::GROUP::>`-style tokens in manifests; Kustomize for structure |
 | **Addon selection** | Per cluster (directory presence) | Per cluster (directory presence) | Per group (directory presence) |
 | **Add a cluster** | A directory per application, plus an ApplicationSet | One `config.yaml`, plus registering the cluster with the hub | Install Argo CD with the shared values and a Secret; no Git change |
 | **Add a base application** | A directory in every cluster | A directory in every group | One directory |
-| **Per-cluster exceptions** | Yes | Yes (addons) | No; selection is per group |
+| **Per-cluster exceptions** | Yes | Yes (addons) | Through a group of one ([how](#day-2-operations)) |
+| **Rollout** | Edit each cluster's revision | All clusters at once from the hub | Per cluster or ring, each pinned to one commit |
 
 The [scale section](#scale) explains why directory count is not the only
 cost that grows with the fleet.
@@ -88,8 +115,12 @@ overlay/
 └── applicationset.yaml      # AppProject + ApplicationSet for cluster-001
 ```
 
-To add an application to a cluster, add its overlay directory. To patch it
-for one cluster, add a patch to that overlay.
+- **Add a cluster:** create `overlay/clusters/<cluster>/<app>/kustomization.yaml`
+  for each application it runs, copy `applicationset.yaml` with the generator
+  path changed to `overlay/clusters/<cluster>/*`, and apply that copy to the
+  cluster's Argo CD.
+- **Add an application to a cluster:** add its overlay directory. To patch
+  it for one cluster, add a patch to that overlay.
 
 | For | Against |
 |---|---|
@@ -100,9 +131,7 @@ for one cluster, add a patch to that overlay.
 ## Approach 2: Matrix
 
 `matrix/`. A hub-and-spoke layout: one Argo CD instance deploys to every
-cluster listed under `matrix/clusters/`. Each of those clusters must be
-registered with the hub (a cluster Secret whose server matches
-`cluster_server` in its `config.yaml`). Installing these ApplicationSets in
+cluster listed under `matrix/clusters/`. Installing these ApplicationSets in
 every cluster's own Argo CD would make each of them try to deploy to the
 whole fleet.
 
@@ -147,6 +176,15 @@ cluster config's `path` overwrites the application's, and every generated
 Application would point at a cluster directory. With it, the template uses
 `{{.app.path.path}}` and `{{.app.path.basename}}`.
 
+- **Add a cluster:** register it with the hub, so a cluster Secret's server
+  matches its `cluster_server` (for example
+  `argocd cluster add <kube-context> --name cluster-004`), then add
+  `matrix/clusters/cluster-004/config.yaml`.
+- **Add a base application:** add it under `matrix/apps/base/` and an overlay
+  for it in every group under `matrix/groups/<group>/apps/`.
+- **Add an addon to a cluster:** add `matrix/clusters/<cluster>/addons/<app>/kustomization.yaml`
+  referencing `../../../../apps/addons/<app>`.
+
 The result for the example clusters, 12 Applications:
 
 | Cluster | Group | Base applications | Addons |
@@ -165,9 +203,9 @@ The result for the example clusters, 12 Applications:
 
 `lovely/`. Every cluster runs its own Argo CD, installed with the same Helm
 values (`lovely/argocd-values.yaml`). Cluster identity lives in the cluster,
-in a `cluster-identity` Secret, not in Git. Manifests carry
-`<::GROUP::>` and `<::CLUSTER_NAME::>` tokens. A Config Management Plugin
-sidecar replaces them with
+in a `cluster-identity` Secret, not in Git. Every key of that Secret is a
+token: manifests carry `<::GROUP::>`, `<::CLUSTER_NAME::>` or any other key
+you add. A Config Management Plugin sidecar replaces them with
 [charmap](https://github.com/ashtonian/charmap) and then renders with
 [argocd-lovely-plugin](https://github.com/crumbhole/argocd-lovely-plugin),
 which runs Kustomize or Helm as each directory needs.
@@ -193,8 +231,9 @@ lovely/
 ### How it fits together
 
 1. Bootstrap creates the `cluster-identity` Secret and installs Argo CD with
-   `lovely/argocd-values.yaml`, which adds the plugin sidecar. The sidecar's
-   environment holds `GROUP` and `CLUSTER_NAME` from the Secret.
+   `lovely/argocd-values.yaml`, which adds the plugin sidecar. The sidecar
+   loads every key of the Secret into its environment with a `FLEET_`
+   prefix: key `GROUP` becomes `FLEET_GROUP`.
 2. A second Helm release, the argocd-apps chart with
    `lovely/bootstrap-values.yaml`, creates the `fleet-bootstrap` Application.
    It is separate because a release cannot create Argo CD resources before
@@ -208,17 +247,19 @@ lovely/
    `applicationsets.yaml` directly would leave the tokens in place and match
    nothing.
 4. The ApplicationSets generate `base-<app>` and `addon-<app>` Applications,
-   pinned to that same commit. Each one names the plugin (`plugin.name: lovely-charmap`), which replaces
-   the tokens in its manifests and renders them.
+   pinned to that same commit. Each one names the plugin
+   (`plugin.name: lovely-charmap`), which replaces the tokens in its
+   manifests and renders them.
 
 The plugin's `generate` script (`lovely/cmp/plugin.yaml`) stops on any
-failure: an unset or empty identity value, an unknown or malformed token, or
-a rendering error. The Application then shows the error, with the file,
-line and column of a bad token, and nothing is applied. charmap replaces
-tokens across the whole `RENDER_ROOT` directory (`lovely/`), not just
-the Application's own directory. Tokens in a base referenced by relative
-path, such as the group addons' `../../../../apps/addons/...`, are therefore
-replaced too. Every render works on a private copy of the repository.
+failure: an unset or empty `GROUP` or `CLUSTER_NAME`, an unknown or
+malformed token, an invalid key name, or a rendering error. The Application
+then shows the error, with the file, line and column of a bad token, and
+nothing is applied. charmap replaces tokens across the whole `RENDER_ROOT`
+directory (`lovely/`), not just the Application's own directory. Tokens in a
+base referenced by relative path, such as the group addons'
+`../../../../apps/addons/...`, are therefore replaced too. Every render works
+on a private copy of the repository.
 
 ### Templated manifests
 
@@ -233,18 +274,57 @@ metadata:
     cluster: "<::CLUSTER_NAME::>"
 ```
 
-Tokens are plain string substitution. For structural differences between
-groups, use Kustomize in the application's directory, or a group-specific
-addon directory.
+Tokens are plain string substitution: the value is inserted as is, with no
+YAML escaping, so keep values to simple strings. For structural differences
+between groups, use Kustomize in the application's directory, or a
+group-specific addon directory.
 
 | For | Against |
 |---|---|
 | No per-cluster or per-group overlay directories | Needs the plugin sidecar image |
 | Adding a cluster changes nothing in Git | String substitution only; structure needs Kustomize |
 | Adding a base application is one directory | Addons are selected per group, not per cluster |
-| Cluster identity can come from a secrets manager | Rendered output exists only inside Argo CD; diff it with the plugin image (see CI) |
+| Cluster identity can come from a secrets manager; adding a value needs no Git or image change | Rendered output exists only inside Argo CD; render it locally with the plugin image ([CI](#ci)) |
 
-## Bootstrapping a cluster (lovely)
+### Prerequisites
+
+- **Kubernetes** 1.36 is tested. The plugin sidecar meets the restricted Pod
+  Security Standard.
+- **Argo CD** 3.5.4 (argo-cd chart 10.10.2) and the argocd-apps chart 2.0.6
+  are tested. Other Argo CD 3.x releases are likely to work but are untested.
+- **Helm** 3.8 or later, or Helm 4, and `kubectl` with cluster-admin rights
+  to install Argo CD.
+- **Network:** the repo-server needs HTTPS access to the Git repository
+  (github.com for this one), and nodes need to pull
+  `ghcr.io/ashtonian/argo-fleet-lovely-cmp` and the workloads' images.
+- **A private repository** needs Argo CD repository credentials: a Secret
+  labelled `argocd.argoproj.io/secret-type: repository` in `argocd`.
+- Optional: [External Secrets](https://external-secrets.io/) to fill the
+  identity Secret from a secrets manager.
+
+### Try it in kind
+
+Render every lovely Application locally, the way the sidecar does, with no
+cluster (needs Docker, `yq`, `rsync` and `git`):
+
+```sh
+docker build -t fleet-cmp lovely/cmp
+scripts/render-test.sh fleet-cmp rendered/   # rendered manifests land in rendered/
+```
+
+Install the whole fleet into a disposable kind cluster (needs `kind`,
+`kubectl`, `helm` and `yq`). The script installs Argo CD into the current
+context, so it refuses any context not named `kind-*`. The revision must be
+a full commit SHA that exists on GitHub, since Argo CD fetches it from there:
+
+```sh
+kind create cluster --name fleet
+scripts/e2e.sh "$(yq '.repoServer.extraContainers[0].image' lovely/argocd-values.yaml)" \
+  "$(git ls-remote https://github.com/ashtonian/argo-fleet.git refs/heads/main | cut -f1)"
+kind delete cluster --name fleet
+```
+
+### Bootstrapping a cluster
 
 1. **Create the identity Secret** in the `argocd` namespace, before
    installing Argo CD, since the sidecar reads it at start:
@@ -300,33 +380,119 @@ addon directory.
 
 Check it with `kubectl -n argocd get applications`: on a us-east cluster
 you see `fleet-bootstrap`, `base-ingress`, `base-logging`, `base-monitoring`
-and `addon-gpu-operator`.
+and `addon-gpu-operator`, all `Synced` and `Healthy`.
 
-## The plugin sidecar image
+### Configuration reference
 
-`lovely/cmp/Dockerfile` builds `ghcr.io/ashtonian/argo-fleet-lovely-cmp`
-from the argocd-lovely-plugin CMP image, adding charmap and
-`lovely/cmp/plugin.yaml`. The binaries and the pipeline that runs them ship
-as one image: a plugin change rolls the repo-server pod, and nothing is
-copied in at pod start.
+**Cluster identity** (Secret `cluster-identity` in `argocd`). Every key is a
+token. Keys must match `[A-Za-z_][A-Za-z0-9_]*`; any other key fails every
+render.
 
-To publish, push a tag `cmp-v<version>` (for example `cmp-v1.0.1`). The
-`CMP image` workflow builds linux/amd64 and linux/arm64, checks each runs a
-charmap built for its platform, and prints the digest. Pin
-`repoServer.extraContainers[0].image` in `lovely/argocd-values.yaml` to it.
+| Key | Required | Used for |
+|---|---|---|
+| `GROUP` | Yes, non-empty | Selects `lovely/groups/<GROUP>/addons/*`; the `group` label in the example manifests |
+| `CLUSTER_NAME` | Yes, non-empty | The `cluster` label in the example manifests |
+| any other key, e.g. `REGION` | No | Available as `<::REGION::>` in any manifest under `RENDER_ROOT` |
+| `REVISION` | Reserved | Always the commit Argo CD resolved; a `REVISION` key is ignored |
 
-The image renders Helm charts with Helm 4, as argocd-lovely-plugin 2 does.
-For charts that still need Helm 3, set `LOVELY_HELM_PATH=/usr/local/bin/helm3`
-in the sidecar's `env` in `lovely/argocd-values.yaml`. It applies to every
-Application on the cluster: Applications cannot choose it themselves,
-because the plugin ignores their `plugin.env` (see [Security](#security)).
+**`lovely/argocd-values.yaml`** (argo-cd chart)
 
-The sidecar runs as UID 999 with a read-only root filesystem, no
-capabilities and the RuntimeDefault seccomp profile. It meets the restricted
-Pod Security Standard, which the CI end-to-end test enforces. Its scratch
-space is a disk-backed `emptyDir` limited to 2 GiB.
+| Setting | Default | Description |
+|---|---|---|
+| `repoServer.extraContainers[0].image` | `ghcr.io/ashtonian/argo-fleet-lovely-cmp:<version>@sha256:…` | The plugin image. Keep it pinned by digest. |
+| `…envFrom[0].prefix` | `FLEET_` | Prefix under which the Secret's keys enter the sidecar. `plugin.yaml` reads this prefix; change both together. |
+| `…env RENDER_ROOT` | `lovely` | Directory, relative to the repository root, where tokens are replaced on every render. It must contain every file any Application uses. |
+| `…env LOVELY_HELM_PATH` | unset (Helm 4) | Set to `/usr/local/bin/helm3` to render Helm charts with Helm 3, for every Application on the cluster. |
+| `…resources` | requests 100m CPU, 256Mi memory, 1Gi ephemeral storage; limits 1Gi memory, 2Gi ephemeral storage | Sidecar resources. Raise memory for large Helm charts or many concurrent renders. |
+| `repoServer.volumes` `lovely-charmap-tmp` | disk-backed `emptyDir`, `sizeLimit: 2Gi` | Scratch for per-render repository copies. |
+| `configs.params."applicationsetcontroller.policy"` | `create-update` | ApplicationSets never delete Applications (see [Deletion safety](#deletion-safety)). |
+| `configs.params."reposerver.plugin.tar.exclusions"` | `.git` | Paths not streamed to the plugin. Add large unused directories here. |
 
-## Staged rollout and rollback
+**`lovely/bootstrap-values.yaml`** (argocd-apps chart)
+
+| Setting | Default | Description |
+|---|---|---|
+| `applications.fleet-bootstrap.source.targetRevision` | `main` | The revision this cluster follows: a branch, tag or commit. The one per-cluster rollout setting. |
+| `applications.fleet-bootstrap.source.repoURL`, `projects.fleet-bootstrap.sourceRepos` | this repository | Where the fleet definition lives. |
+| `applications.fleet-bootstrap.syncPolicy` | automated, no prune, 5 retries | Pruning is off: pruning an ApplicationSet deletes every Application it owns. |
+
+**Inside the plugin** (`lovely/cmp/plugin.yaml`): it reads `FLEET_*`,
+`RENDER_ROOT`, and Argo CD's `ARGOCD_APP_SOURCE_PATH`,
+`ARGOCD_APP_REVISION`, `KUBE_VERSION` and `KUBE_API_VERSIONS`. It removes
+every `ARGOCD_ENV_*` variable an Application sets before running anything.
+
+### Using it in your own repository
+
+1. **Copy `lovely/`, `scripts/` and `.github/`** into your repository. Drop
+   `overlay/` and `matrix/`, and remove their `kubeconform` line from
+   `.github/workflows/ci.yaml`.
+2. **Point it at your repository.** The URL appears in
+   `lovely/bootstrap/applicationsets.yaml` (4 times),
+   `lovely/bootstrap/project.yaml` and `lovely/bootstrap-values.yaml` (twice):
+
+   ```sh
+   grep -rl 'https://github.com/ashtonian/argo-fleet.git' lovely |
+     xargs sed -i.bak 's#https://github.com/ashtonian/argo-fleet.git#https://github.com/<you>/<repo>.git#g'
+   find lovely -name '*.bak' -delete
+   ```
+
+   For a private repository, add Argo CD repository credentials (see
+   [Prerequisites](#prerequisites)).
+3. **The plugin image.** Keep using `ghcr.io/ashtonian/argo-fleet-lovely-cmp`
+   as pinned, unless you change `lovely/cmp/plugin.yaml`. Then publish your
+   own: set `IMAGE` in `.github/workflows/cmp-image.yaml`, push a
+   `cmp-v<version>` tag, and pin the printed digest in
+   `lovely/argocd-values.yaml`.
+4. **Directory names.** If `lovely/` moves, set `RENDER_ROOT` and the paths in
+   `lovely/bootstrap/applicationsets.yaml` and `lovely/bootstrap-values.yaml`.
+5. **Replace the example workloads** in `lovely/apps` with your own. An
+   application that needs CRDs, ClusterRoles or other cluster-scoped
+   resources needs its own AppProject; `fleet` allows only Namespaces.
+6. **Adjust the tests:** `scripts/render-test.sh` checks the example groups,
+   clusters and labels, and `scripts/e2e.sh` the example Application names.
+
+### Day-2 operations
+
+Every change below reaches a cluster when its `fleet-bootstrap` revision
+includes it (see [Staged rollout](#staged-rollout-and-rollback)).
+
+- **Add a base application:** create `lovely/apps/base/<app>/` with a
+  `kustomization.yaml` and its manifests. Every cluster gets `base-<app>` in
+  namespace `<app>`.
+- **Add an addon:** define it in `lovely/apps/addons/<app>/`, then select it
+  for a group with `lovely/groups/<group>/addons/<app>/kustomization.yaml`
+  containing `resources: [../../../../apps/addons/<app>]`. Clusters in that
+  group get `addon-<app>`.
+- **Add a group:** set `GROUP` to the new name in the clusters' identity, and
+  create `lovely/groups/<group>/addons/` with its addons. A group without
+  addons needs no directory; its clusters get only the base applications.
+- **Give one cluster different addons:** give it a group of its own (for
+  example `us-east-gpu`) with its own addon selection.
+- **Add an identity value:** add the key to the cluster's Secret (or its
+  secrets-manager entry), then follow [Changing a cluster's
+  identity](#changing-a-clusters-identity). Add the key to every cluster
+  before merging manifests that use it: a cluster without it fails to render
+  them, and changes nothing, until it has it.
+- **Retire an application:** see [Deletion safety](#deletion-safety).
+
+#### Changing a cluster's identity
+
+The sidecar reads the Secret when it starts, and Argo CD's manifest cache key
+does not include the sidecar's environment. After changing the Secret:
+
+1. Restart the repo-server: `kubectl -n argocd rollout restart deployment argocd-repo-server`.
+2. Hard-refresh every Application so it re-renders:
+
+   ```sh
+   kubectl -n argocd get applications -o name |
+     xargs -I{} kubectl -n argocd annotate {} argocd.argoproj.io/refresh=hard --overwrite
+   ```
+
+When a cluster moves to another group, the new group's addons are created,
+but the old group's addons stay, because ApplicationSets never delete. Remove
+them on purpose ([Deletion safety](#deletion-safety)).
+
+### Staged rollout and rollback
 
 A cluster has one setting for what it runs: the `targetRevision` of its
 `fleet-bootstrap` Application, a branch, tag or commit. The plugin replaces
@@ -351,23 +517,94 @@ A new revision re-renders `fleet-bootstrap`, which re-pins the
 ApplicationSets, which update their Applications. No manual refresh is
 needed.
 
-## Changing a cluster's identity
+### The plugin sidecar image
 
-`GROUP` and `CLUSTER_NAME` are read from the Secret when the sidecar
-starts, and Argo CD's manifest cache key does not include the sidecar's
-environment. After changing the Secret:
+`lovely/cmp/Dockerfile` builds `ghcr.io/ashtonian/argo-fleet-lovely-cmp`
+from the argocd-lovely-plugin CMP image, adding charmap and
+`lovely/cmp/plugin.yaml`. Both bases are pinned by digest. The binaries and
+the pipeline that runs them ship as one image: a plugin change rolls the
+repo-server pod, and nothing is copied in at pod start. Published versions
+are listed under [Releases](https://github.com/ashtonian/argo-fleet/releases).
 
-1. Restart the repo-server: `kubectl -n argocd rollout restart deployment argocd-repo-server`.
-2. Hard-refresh every Application so it re-renders:
+The image renders Helm charts with Helm 4, as argocd-lovely-plugin 2 does,
+and ships Helm 3 as `/usr/local/bin/helm3` (see `LOVELY_HELM_PATH` in the
+[configuration reference](#configuration-reference)). Applications cannot
+choose it themselves, because the plugin ignores their `plugin.env`.
 
-   ```sh
-   kubectl -n argocd get applications -o name |
-     xargs -I{} kubectl -n argocd annotate {} argocd.argoproj.io/refresh=hard --overwrite
-   ```
+The sidecar runs as UID 999 with a read-only root filesystem, no
+capabilities and the RuntimeDefault seccomp profile. It meets the restricted
+Pod Security Standard, which the CI end-to-end test enforces. Its scratch
+space is a disk-backed `emptyDir` limited to 2 GiB.
 
-When a cluster moves to another group, the new group's addons are created,
-but the old group's addons stay, because ApplicationSets never delete
-(below). Remove them on purpose.
+### Troubleshooting
+
+Start with the Application's conditions; a render error names the file,
+line and column:
+
+```sh
+kubectl -n argocd get applications
+kubectl -n argocd get application <name> \
+  -o jsonpath='{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}'
+```
+
+| Symptom | Check | Then |
+|---|---|---|
+| repo-server pod in `CreateContainerConfigError` | `kubectl -n argocd get secret cluster-identity` | Create the Secret, then let the pod restart. |
+| `ComparisonError: … FLEET_GROUP: parameter null or not set` | `kubectl -n argocd exec deploy/argocd-repo-server -c lovely-charmap -- env \| grep '^FLEET_'` | Set a non-empty `GROUP` (or `CLUSTER_NAME`) in the Secret, then [restart and refresh](#changing-a-clusters-identity). |
+| `ComparisonError: … no value for KEY` | The same command: is `FLEET_KEY` there? | Add the key to the Secret, then restart and refresh. A new key needs the restart. |
+| `ComparisonError: … is not a valid key` | The Secret's key names | Rename keys to `[A-Za-z_][A-Za-z0-9_]*`. |
+| `ComparisonError: … malformed token` | The reported file, line and column | Fix the token. The file may belong to another Application: every file under `RENDER_ROOT` is checked. |
+| `could not find cmp-server plugin with name "lovely-charmap"` | `kubectl -n argocd get pod -l app.kubernetes.io/component=repo-server -o jsonpath='{.items[0].status.containerStatuses[*].name}'` | The `lovely-charmap` container must be running; check its logs below. |
+| Addons missing on a cluster | `kubectl -n argocd get applicationset fleet-group-addons -o jsonpath='{.spec.generators[0].git.directories[0].path}'` | The path must name an existing `lovely/groups/<group>` directory at the pinned revision. |
+| An ApplicationSet generates nothing | `kubectl -n argocd get applicationset -o jsonpath='{range .items[*]}{.metadata.name}: {range .status.conditions[*]}{.type}={.status} {.message}; {end}{"\n"}{end}'` | An `ErrorOccurred` condition names the cause. |
+| Old values after changing the Secret | — | [Restart and refresh](#changing-a-clusters-identity); the render cache ignores the sidecar's environment. |
+| A sync keeps failing | `kubectl -n argocd get application <name> -o jsonpath='{.status.operationState.message}'` | Fix the cause. Automated sync retries 5 times with backoff, then waits for the next change. |
+
+Plugin logs: `kubectl -n argocd logs deploy/argocd-repo-server -c lovely-charmap`.
+To reproduce a render exactly, run `scripts/render-test.sh` against the
+pinned image ([Try it in kind](#try-it-in-kind)).
+
+### Monitoring
+
+Argo CD's metrics cover the fleet; scrape the application controller and
+ApplicationSet controller (the chart's `metrics` settings). Useful signals:
+
+- `argocd_app_info` by `sync_status` and `health_status`: alert when an
+  Application stays `OutOfSync` or not `Healthy`.
+- `argocd_app_condition` by `condition`: alert on `ComparisonError`, which
+  is how every render failure shows up.
+- `argocd_appset_info` and `argocd_appset_reconcile`: ApplicationSet status
+  and reconcile errors.
+- `kube_pod_container_status_restarts_total` for the `lovely-charmap`
+  container (kube-state-metrics).
+
+Alert on a drop in the number of Applications on a cluster too: with
+`create-update` nothing deletes them, so a drop means someone did.
+
+### Upgrading
+
+- **Argo CD:** change the chart version in the [bootstrap
+  commands](#bootstrapping-a-cluster), in CI (`ARGO_CD_CHART_VERSION` in
+  `.github/workflows/ci.yaml`) and in the default in `scripts/e2e.sh`, let
+  CI's end-to-end test pass, then `helm upgrade argocd` ring by ring.
+- **The plugin image** (argocd-lovely-plugin, charmap): Dependabot proposes
+  new base digests in `lovely/cmp/Dockerfile`, and CI builds and tests the
+  image on the pull request. After merging, push a `cmp-v<version>` tag, pin
+  the printed digest in `lovely/argocd-values.yaml`, and roll it out with
+  `helm upgrade argocd` ring by ring. A major argocd-lovely-plugin version
+  can change how Helm charts render; read its release notes.
+- **GitHub Actions:** Dependabot proposes updates to the pinned actions.
+
+### Limitations
+
+- **Per-group addon selection.** A per-cluster exception needs a group of one.
+- **String substitution only.** Structural differences need Kustomize.
+- **Identity changes need a restart and a hard refresh**, because the render
+  cache ignores the sidecar's environment.
+- **Every file under `RENDER_ROOT` must render** for every cluster: one bad
+  token fails every Application on the clusters that see it.
+- **One repository per fleet**, polled by every cluster (see [Scale](#scale)).
+- **The example workloads are placeholders** (`busybox` printing a message).
 
 ## Deletion safety
 
@@ -385,20 +622,15 @@ applications from every affected cluster. So:
 - `fleet-bootstrap` does not prune, since pruning an ApplicationSet would
   delete every Application it owns.
 
-To retire an application: remove its directory, then delete its
-Application together with its resources with
-`argocd app delete <name> --cascade`.
+To retire an application, remove its directory, then delete its Application
+together with its resources: `argocd app delete <name> --cascade`, or with
+kubectl, add the resources finalizer and delete:
 
-## Failure behaviour (lovely)
-
-| What goes wrong | What you see | What is applied |
-|---|---|---|
-| `cluster-identity` missing a key | The repo-server pod does not start (`CreateContainerConfigError`) | Nothing changes |
-| Identity value empty | Application `ComparisonError`: `GROUP: parameter null or not set` | Nothing changes |
-| Unknown or malformed token anywhere under `RENDER_ROOT` (`lovely/`) | Application `ComparisonError` naming `path:line:column` | Nothing changes |
-| Plugin sidecar missing or misnamed | Application `ComparisonError`: plugin not found | Nothing changes; no fallback renderer |
-| Generator matches nothing (typo, rename) | Fewer Applications generated | Existing Applications and resources stay |
-| A sync fails | Retried 5 times with backoff up to 5 minutes, then shown as failed | The previous state stays |
+```sh
+kubectl -n argocd patch application <name> --type merge \
+  -p '{"metadata":{"finalizers":["resources-finalizer.argocd.argoproj.io"]}}'
+kubectl -n argocd delete application <name>
+```
 
 ## Scale
 
@@ -425,6 +657,9 @@ whatever the layout:
 - **Repository writers deploy to every cluster.** Protect the default
   branch and the revisions clusters follow; staged rollout limits how many
   clusters a bad change reaches before it is caught.
+- **Identity Secret writers** decide what every token on that cluster
+  becomes, and which group's addons it runs. Restrict write access to the
+  Secret and to its secrets-manager entry.
 - **AppProjects** limit what the generated Applications can do: `fleet`,
   `overlay` and `matrix` allow only this repository as a source, refuse the
   `argocd` and `kube-*` namespaces, and allow no cluster-scoped resource
@@ -434,11 +669,10 @@ whatever the layout:
 - **Identity values** end up in rendered manifests and Argo CD's UI. Do not
   put secrets in the `cluster-identity` Secret; deliver workload secrets to
   their namespaces directly, for example with External Secrets.
-- **The plugin** substitutes only `GROUP`, `CLUSTER_NAME` and `REVISION`
-  (the resolved commit);
-  charmap reads nothing else from the environment. argocd-lovely-plugin
-  would also accept settings, including commands to run, from an
-  Application's `plugin.env`; the `generate` script drops every
+- **The plugin** substitutes only the Secret's keys and `REVISION` (the
+  resolved commit); charmap reads nothing else from the environment.
+  argocd-lovely-plugin would also accept settings, including commands to
+  run, from an Application's `plugin.env`; the `generate` script drops every
   Application-supplied variable first, so only the sidecar's own
   configuration applies.
 
@@ -478,22 +712,28 @@ metadata:
 `.github/workflows/ci.yaml` runs on every pull request and push to `main`:
 
 - **static**: actionlint; shellcheck on the scripts and the plugin's
-  `generate` script; `kustomize build` of every application; ApplicationSets
-  and AppProjects validated against Argo CD's CRD schemas.
+  `generate` script; `kustomize build` of every application; ApplicationSets,
+  AppProjects and the bootstrap release validated against Argo CD's CRD
+  schemas.
 - **render**: builds the plugin image and runs `scripts/render-test.sh`.
   That renders every lovely Application inside the image, for a us-east and
-  an eu-west identity, with a read-only root filesystem as in the sidecar. It
-  fails on any error or leftover token. It also checks that an empty
-  identity or an unknown token stops the render with no output, and
-  validates the rendered manifests.
+  an eu-west identity, with a read-only root filesystem as in the sidecar, and
+  validates the output. It fails on any error or leftover token, and checks
+  that the bootstrap pins both ApplicationSets to the resolved commit. It
+  also checks that an empty identity, an invalid key name or an unknown
+  token stops the render with no output, that any extra identity key fills
+  its token, and that plugin environment set by an Application is ignored.
 - **e2e**: `scripts/e2e.sh` installs Argo CD with `lovely/argocd-values.yaml`
-  and the bootstrap with `lovely/bootstrap-values.yaml`
-  into a kind cluster whose `argocd` namespace enforces the restricted Pod
-  Security Standard. It checks that the fleet comes up from the commit under
-  test: the expected Applications, synced and healthy, with the identity and
-  revision on the workloads.
+  and the bootstrap with `lovely/bootstrap-values.yaml` into a kind cluster
+  whose `argocd` namespace enforces the restricted Pod Security Standard. It
+  checks that the fleet comes up from the commit under test: the expected
+  Applications, synced and healthy, with the identity and revision on the
+  workloads.
 
-`.github/workflows/cmp-image.yaml` publishes the plugin image (see above).
+`.github/workflows/cmp-image.yaml` publishes the plugin image on a
+`cmp-v<version>` tag, after checking each platform runs its own charmap.
+Dependabot (`.github/dependabot.yml`) proposes updates to the actions and the
+plugin image's bases.
 
 ## Repository layout
 
@@ -507,8 +747,6 @@ metadata:
 | `lovely/argocd-values.yaml` | Argo CD Helm values for every lovely cluster |
 | `lovely/bootstrap-values.yaml` | argocd-apps values: the `fleet-bootstrap` Application and its AppProject |
 | `scripts/render-test.sh` | Renders every lovely Application in the plugin image |
-| `scripts/e2e.sh` | Installs and checks the lovely fleet in a disposable cluster |
-
-The example workloads are placeholder Deployments (`busybox` printing a
-message), there to show delivery, not working monitoring, ingress or GPU
-operators.
+| `scripts/e2e.sh` | Installs and checks the lovely fleet in a disposable kind cluster |
+| `.github/workflows/` | CI and the plugin image release |
+| `.github/dependabot.yml` | Update proposals for actions and the plugin image's bases |

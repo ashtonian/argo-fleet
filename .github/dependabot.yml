@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  # The plugin image's bases: charmap and argocd-lovely-plugin.
+  - package-ecosystem: docker
+    directory: /lovely/cmp
+    schedule:
+      interval: weekly
