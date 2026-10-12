@@ -1,9 +1,27 @@
 # Argo CD fleet patterns
 
+[![CI](https://github.com/ashtonian/argo-fleet/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/ashtonian/argo-fleet/actions/workflows/ci.yaml)
+[![Plugin image](https://img.shields.io/github/v/release/ashtonian/argo-fleet?label=plugin%20image)](https://github.com/ashtonian/argo-fleet/releases/latest)
+
 Three ways to run the same applications across a fleet of Kubernetes
 clusters with Argo CD ApplicationSets, from one Git repository: base
 applications on every cluster, per-group overrides, and addons on selected
 clusters.
+
+Tested with Argo CD 3.5.4 (argo-cd chart 10.10.2, argocd-apps chart 2.0.6)
+on Kubernetes 1.36, argocd-lovely-plugin 2.0.0 and
+[charmap](https://github.com/ashtonian/charmap) 2.0.0. CI installs the
+lovely approach into a kind cluster on every change; the overlay and matrix
+manifests are built and validated against Argo CD's schemas.
+
+### Which one?
+
+- **Overlay** for a handful of clusters that each need their own patches.
+- **Matrix** when one central Argo CD manages every cluster and groups
+  need structural differences (replicas, resources, images).
+- **Lovely + charmap** when every cluster runs its own Argo CD: clusters
+  join with no Git change, identity can come from a secrets manager, and
+  each cluster runs one pinned commit, so changes roll out ring by ring.
 
 | | [Overlay](#approach-1-overlay) | [Matrix](#approach-2-matrix) | [Lovely + charmap](#approach-3-lovely--charmap) |
 |---|---|---|---|
