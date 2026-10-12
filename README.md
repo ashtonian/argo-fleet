@@ -297,6 +297,12 @@ To publish, push a tag `cmp-v<version>` (for example `cmp-v1.0.1`). The
 charmap built for its platform, and prints the digest. Pin
 `repoServer.extraContainers[0].image` in `lovely/argocd-values.yaml` to it.
 
+The image renders Helm charts with Helm 4, as argocd-lovely-plugin 2 does.
+For charts that still need Helm 3, set `LOVELY_HELM_PATH=/usr/local/bin/helm3`
+in the sidecar's `env` in `lovely/argocd-values.yaml`. It applies to every
+Application on the cluster: Applications cannot choose it themselves,
+because the plugin ignores their `plugin.env` (see [Security](#security)).
+
 The sidecar runs as UID 999 with a read-only root filesystem, no
 capabilities and the RuntimeDefault seccomp profile. It meets the restricted
 Pod Security Standard, which the CI end-to-end test enforces. Its scratch
