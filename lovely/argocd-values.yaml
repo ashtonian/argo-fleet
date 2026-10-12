@@ -7,8 +7,9 @@
 # release cannot create Argo CD resources before it has installed their CRDs.
 #
 # Every cluster uses these values unchanged. What differs per cluster is the
-# cluster-identity Secret (group, cluster name), created before the install,
-# for example by External Secrets from a secrets manager.
+# cluster-identity Secret (GROUP, CLUSTER_NAME and any other values the
+# manifests use), created before the install, for example by External Secrets
+# from a secrets manager.
 #
 # Chart: https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd
 # Tested with chart 10.10.2 (Argo CD v3.5.4).
@@ -36,17 +37,14 @@ repoServer:
       # configuration) by the CMP image workflow, which prints the digest.
       image: ghcr.io/ashtonian/argo-fleet-lovely-cmp:2.0.0@sha256:611c7c1673c933ef7ad499eb8c9a75b51ca765be5b04acb2e11c048404dc35cd
       command: [/var/run/argocd/argocd-cmp-server]
+      # Every key of the cluster-identity Secret becomes a token: key GROUP
+      # is FLEET_GROUP here and the GROUP token in manifests. Keys must match
+      # [A-Za-z_][A-Za-z0-9_]*. The pod does not start without the Secret.
+      envFrom:
+        - prefix: FLEET_
+          secretRef:
+            name: cluster-identity
       env:
-        - name: GROUP
-          valueFrom:
-            secretKeyRef:
-              name: cluster-identity
-              key: group
-        - name: CLUSTER_NAME
-          valueFrom:
-            secretKeyRef:
-              name: cluster-identity
-              key: cluster-name
         # Directory, relative to the repository root, in which charmap
         # replaces tokens on every render. It must contain every file an
         # Application uses, including bases referenced by relative path.

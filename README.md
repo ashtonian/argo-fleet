@@ -215,7 +215,7 @@ The plugin's `generate` script (`lovely/cmp/plugin.yaml`) stops on any
 failure: an unset or empty identity value, an unknown or malformed token, or
 a rendering error. The Application then shows the error, with the file,
 line and column of a bad token, and nothing is applied. charmap replaces
-tokens across the whole `fleet.renderRoot` directory (`lovely/`), not just
+tokens across the whole `RENDER_ROOT` directory (`lovely/`), not just
 the Application's own directory. Tokens in a base referenced by relative
 path, such as the group addons' `../../../../apps/addons/...`, are therefore
 replaced too. Every render works on a private copy of the repository.
@@ -252,8 +252,8 @@ addon directory.
    ```sh
    kubectl create namespace argocd
    kubectl -n argocd create secret generic cluster-identity \
-     --from-literal=group=us-east \
-     --from-literal=cluster-name=cluster-001
+     --from-literal=GROUP=us-east \
+     --from-literal=CLUSTER_NAME=cluster-001
    ```
 
    Or have [External Secrets](https://external-secrets.io/) write it from a
@@ -272,11 +272,11 @@ addon directory.
        name: fleet
      target:
        name: cluster-identity
-     data:
-       - secretKey: group
-         remoteRef: {key: fleet/cluster-identity, property: group}
-       - secretKey: cluster-name
-         remoteRef: {key: fleet/cluster-identity, property: cluster-name}
+     # Every property of the entry becomes a key, and so a token:
+     # {"GROUP": "us-east", "CLUSTER_NAME": "cluster-001", "REGION": "us-east-1"}
+     dataFrom:
+       - extract:
+           key: fleet/cluster-identity
    ```
 
 2. **Install Argo CD** with the shared values:
@@ -395,7 +395,7 @@ Application together with its resources with
 |---|---|---|
 | `cluster-identity` missing a key | The repo-server pod does not start (`CreateContainerConfigError`) | Nothing changes |
 | Identity value empty | Application `ComparisonError`: `GROUP: parameter null or not set` | Nothing changes |
-| Unknown or malformed token anywhere under `fleet.renderRoot` | Application `ComparisonError` naming `path:line:column` | Nothing changes |
+| Unknown or malformed token anywhere under `RENDER_ROOT` (`lovely/`) | Application `ComparisonError` naming `path:line:column` | Nothing changes |
 | Plugin sidecar missing or misnamed | Application `ComparisonError`: plugin not found | Nothing changes; no fallback renderer |
 | Generator matches nothing (typo, rename) | Fewer Applications generated | Existing Applications and resources stay |
 | A sync fails | Retried 5 times with backoff up to 5 minutes, then shown as failed | The previous state stays |

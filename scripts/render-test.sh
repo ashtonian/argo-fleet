@@ -39,7 +39,7 @@ run_plugin() {
   shift 3
   docker run --rm --read-only --tmpfs /tmp --user "$(id -u):$(id -g)" "$@" \
     -v "$work/repo:/repo" -w "/repo/$path" \
-    -e GROUP="$group" -e CLUSTER_NAME="$cluster" -e RENDER_ROOT=lovely \
+    -e FLEET_GROUP="$group" -e FLEET_CLUSTER_NAME="$cluster" -e RENDER_ROOT=lovely \
     -e ARGOCD_APP_SOURCE_PATH="$path" -e ARGOCD_APP_REVISION="$revision" \
     -e KUBE_VERSION=1.35.0 -e KUBE_API_VERSIONS=v1,apps/v1 \
     --entrypoint bash "$image" -c "$script"
@@ -97,6 +97,25 @@ fresh_copy
 run_plugin us-east cluster-001 lovely/apps/base/logging -e ARGOCD_ENV_LOVELY_PREPROCESSORS=false >/dev/null ||
   fail "an Application-supplied lovely preprocessor ran"
 echo "ok   Application plugin environment is ignored"
+
+# Any key of the identity Secret is a token, with no change to the plugin:
+# a REGION key fills a REGION token.
+fresh_copy
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\ndata:\n  region: "<::REGION::>"\n' \
+  >"$work/repo/lovely/apps/base/logging/region.yaml"
+printf 'resources:\n  - deployment.yaml\n  - region.yaml\n' >"$work/repo/lovely/apps/base/logging/kustomization.yaml"
+region=$(run_plugin us-east cluster-001 lovely/apps/base/logging -e FLEET_REGION=us-east-1) ||
+  fail "a render with an extra identity key failed"
+grep -q 'region: us-east-1' <<<"$region" || fail "the REGION identity key did not fill its token"
+echo "ok   any identity key is a token"
+
+# A Secret key that is not a valid token name stops the render.
+fresh_copy
+if stdout=$(run_plugin us-east cluster-001 lovely/apps/base/logging -e FLEET_cluster-name=x 2>/dev/null); then
+  fail "render succeeded with an invalid identity key"
+fi
+[[ -z $stdout ]] || fail "render with an invalid identity key printed manifests"
+echo "ok   invalid identity key is rejected"
 
 # An unknown token anywhere under RENDER_ROOT stops the render, even in a
 # file this Application does not use.

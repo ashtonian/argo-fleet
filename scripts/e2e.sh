@@ -37,7 +37,7 @@ trap 'dump; rm -rf "$work"' ERR
 kubectl create namespace argocd
 kubectl label namespace argocd pod-security.kubernetes.io/enforce=restricted
 kubectl -n argocd create secret generic cluster-identity \
-  --from-literal=group=us-east --from-literal=cluster-name=cluster-001
+  --from-literal=GROUP=us-east --from-literal=CLUSTER_NAME=cluster-001
 
 IMAGE=$image yq '.repoServer.extraContainers[0].image = strenv(IMAGE)' \
   "$repo/lovely/argocd-values.yaml" >"$work/values.yaml"
