@@ -19,11 +19,14 @@ spec:
         # Cluster identity comes from the sidecar's environment, which
         # argocd-values.yaml fills from the cluster-identity Secret. An unset
         # or empty value stops the render instead of producing empty labels.
-        : "${GROUP:?}" "${CLUSTER_NAME:?}" "${REVISION:?}" "${RENDER_ROOT:?}"
+        # REVISION is the commit Argo CD resolved for this Application, so
+        # the ApplicationSets that fleet-bootstrap renders pin every
+        # Application to that same commit.
+        : "${GROUP:?}" "${CLUSTER_NAME:?}" "${RENDER_ROOT:?}" "${ARGOCD_APP_REVISION:?}"
         # Substitute across RENDER_ROOT rather than only this Application's
         # directory, so tokens in bases it references by relative path are
         # replaced too. Each render works on a private copy of the repository.
         repo_root=${PWD%"/$ARGOCD_APP_SOURCE_PATH"}
-        charmap render --dir "$repo_root/$RENDER_ROOT" --env GROUP --env CLUSTER_NAME --env REVISION
+        charmap render --dir "$repo_root/$RENDER_ROOT" --env GROUP --env CLUSTER_NAME --set "REVISION=$ARGOCD_APP_REVISION"
         export LOVELY_KUSTOMIZE_PARAMS="--helm-kube-version=$KUBE_VERSION --helm-api-versions=$KUBE_API_VERSIONS"
         exec argocd-lovely-plugin

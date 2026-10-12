@@ -1,27 +1,17 @@
 # Argo CD Helm chart values for the lovely approach.
 #
 # Installs a Config Management Plugin sidecar that replaces cluster identity
-# tokens with charmap and renders with argocd-lovely-plugin, and the
-# fleet-bootstrap Application that installs the fleet AppProject and
-# ApplicationSets through it.
+# tokens with charmap and renders with argocd-lovely-plugin. The
+# fleet-bootstrap Application that uses it is a second Helm release, made
+# from lovely/bootstrap-values.yaml with the argocd-apps chart, because a
+# release cannot create Argo CD resources before it has installed their CRDs.
 #
-# Every cluster uses these values. Per cluster, two things differ:
-#   - the cluster-identity Secret (group, cluster name), created before the
-#     install, for example by External Secrets from a secrets manager;
-#   - fleet.revision, the Git revision the cluster follows (see README,
-#     "Staged rollout").
+# Every cluster uses these values unchanged. What differs per cluster is the
+# cluster-identity Secret (group, cluster name), created before the install,
+# for example by External Secrets from a secrets manager.
 #
 # Chart: https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd
 # Tested with chart 10.10.2 (Argo CD v3.5.4).
-
-fleet:
-  # -- Git revision of this repository the cluster deploys: a branch, tag or
-  # commit SHA. Clusters in the same rollout ring share a value.
-  revision: main
-  # -- Directory, relative to the repository root, in which charmap replaces
-  # tokens on every render. It must contain every file an Application uses,
-  # including bases referenced by relative path.
-  renderRoot: lovely
 
 configs:
   params:
@@ -57,10 +47,11 @@ repoServer:
             secretKeyRef:
               name: cluster-identity
               key: cluster-name
-        - name: REVISION
-          value: "{{ .Values.fleet.revision }}"
+        # Directory, relative to the repository root, in which charmap
+        # replaces tokens on every render. It must contain every file an
+        # Application uses, including bases referenced by relative path.
         - name: RENDER_ROOT
-          value: "{{ .Values.fleet.renderRoot }}"
+          value: lovely
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
@@ -87,56 +78,3 @@ repoServer:
           mountPath: /home/argocd/cmp-server/plugins
         - name: lovely-charmap-tmp
           mountPath: /tmp
-
-extraObjects:
-  # The project of the fleet-bootstrap Application: it may only manage the
-  # fleet's AppProject and ApplicationSets in this namespace.
-  - apiVersion: argoproj.io/v1alpha1
-    kind: AppProject
-    metadata:
-      name: fleet-bootstrap
-      namespace: "{{ .Release.Namespace }}"
-    spec:
-      description: Installs the fleet AppProject and ApplicationSets.
-      sourceRepos:
-        - https://github.com/ashtonian/argo-fleet.git
-      destinations:
-        - server: https://kubernetes.default.svc
-          namespace: "{{ .Release.Namespace }}"
-      clusterResourceWhitelist: []
-      namespaceResourceWhitelist:
-        - group: argoproj.io
-          kind: AppProject
-        - group: argoproj.io
-          kind: ApplicationSet
-
-  # Renders lovely/bootstrap through the plugin, which replaces the identity
-  # tokens in the ApplicationSets before the ApplicationSet controller reads
-  # them.
-  - apiVersion: argoproj.io/v1alpha1
-    kind: Application
-    metadata:
-      name: fleet-bootstrap
-      namespace: "{{ .Release.Namespace }}"
-    spec:
-      project: fleet-bootstrap
-      source:
-        repoURL: https://github.com/ashtonian/argo-fleet.git
-        targetRevision: "{{ .Values.fleet.revision }}"
-        path: lovely/bootstrap
-        plugin:
-          name: lovely-charmap
-      destination:
-        server: https://kubernetes.default.svc
-        namespace: "{{ .Release.Namespace }}"
-      syncPolicy:
-        automated:
-          # Pruning an ApplicationSet deletes every Application it owns.
-          prune: false
-          selfHeal: true
-        retry:
-          limit: 5
-          backoff:
-            duration: 10s
-            factor: 2
-            maxDuration: 5m

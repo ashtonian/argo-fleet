@@ -16,6 +16,8 @@ env:
   KUSTOMIZE_VERSION: v5.8.3
   KUBECONFORM_VERSION: v0.8.0
   ACTIONLINT_VERSION: v1.7.12
+  ARGO_CD_CHART_VERSION: 10.10.2
+  ARGOCD_APPS_CHART_VERSION: 2.0.6
   # CRD schemas for ApplicationSet, AppProject and Application.
   CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
 
@@ -36,6 +38,9 @@ jobs:
           go install "sigs.k8s.io/kustomize/kustomize/v5@${KUSTOMIZE_VERSION#kustomize/}"
           go install "github.com/yannh/kubeconform/cmd/kubeconform@$KUBECONFORM_VERSION"
           go install "github.com/rhysd/actionlint/cmd/actionlint@$ACTIONLINT_VERSION"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.0
       - name: actionlint
         run: actionlint
       - name: shellcheck
@@ -57,7 +62,8 @@ jobs:
             overlay/applicationset.yaml matrix/applicationsets.yaml
           kustomize build lovely/bootstrap |
             kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS"
-          yq '.extraObjects[] | split_doc' lovely/argocd-values.yaml | sed "s/{{ .Release.Namespace }}/argocd/g; s/{{ .Values.fleet.revision }}/main/g" |
+          helm template fleet-bootstrap argocd-apps --repo https://argoproj.github.io/argo-helm \
+            --version "$ARGOCD_APPS_CHART_VERSION" --namespace argocd --values lovely/bootstrap-values.yaml |
             kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS"
 
   # Renders every lovely Application inside the plugin image, the way the

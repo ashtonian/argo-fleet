@@ -168,25 +168,29 @@ lovely/
 ├── cmp/                     # the plugin sidecar image
 │   ├── Dockerfile
 │   └── plugin.yaml
-└── argocd-values.yaml       # Argo CD Helm values, the same for every cluster
+├── argocd-values.yaml       # Argo CD Helm values, the same for every cluster
+└── bootstrap-values.yaml    # argocd-apps values: the fleet-bootstrap Application
 ```
 
 ### How it fits together
 
 1. Bootstrap creates the `cluster-identity` Secret and installs Argo CD with
-   `lovely/argocd-values.yaml`. The values add the plugin sidecar, whose
-   environment holds `GROUP` and `CLUSTER_NAME` from the Secret and
-   `REVISION` from `fleet.revision`. They also create the `fleet-bootstrap`
-   Application.
-2. `fleet-bootstrap` renders `lovely/bootstrap` through the plugin, so the
+   `lovely/argocd-values.yaml`, which adds the plugin sidecar. The sidecar's
+   environment holds `GROUP` and `CLUSTER_NAME` from the Secret.
+2. A second Helm release, the argocd-apps chart with
+   `lovely/bootstrap-values.yaml`, creates the `fleet-bootstrap` Application.
+   It is separate because a release cannot create Argo CD resources before
+   it has installed their CRDs.
+3. `fleet-bootstrap` renders `lovely/bootstrap` through the plugin, so the
    tokens in the ApplicationSets are replaced before the ApplicationSet
    controller reads them. The addon generator's path becomes
-   `lovely/groups/us-east/addons/*` on a us-east cluster. A generator path
-   is never rendered by a plugin on its own, so applying
-   `applicationsets.yaml` directly would leave the token in place and match
+   `lovely/groups/us-east/addons/*` on a us-east cluster, and
+   `<::REVISION::>` becomes the commit `fleet-bootstrap` resolved. A
+   generator path is never rendered by a plugin on its own, so applying
+   `applicationsets.yaml` directly would leave the tokens in place and match
    nothing.
-3. The ApplicationSets generate `base-<app>` and `addon-<app>` Applications.
-   Each one names the plugin (`plugin.name: lovely-charmap`), which replaces
+4. The ApplicationSets generate `base-<app>` and `addon-<app>` Applications,
+   pinned to that same commit. Each one names the plugin (`plugin.name: lovely-charmap`), which replaces
    the tokens in its manifests and renders them.
 
 The plugin's `generate` script (`lovely/cmp/plugin.yaml`) stops on any
@@ -257,15 +261,23 @@ addon directory.
          remoteRef: {key: fleet/cluster-identity, property: cluster-name}
    ```
 
-2. **Install Argo CD** with the shared values and the cluster's revision:
+2. **Install Argo CD** with the shared values:
 
    ```sh
    helm install argocd argo-cd --repo https://argoproj.github.io/argo-helm \
-     --version 10.10.2 --namespace argocd \
-     --values lovely/argocd-values.yaml --set fleet.revision=main
+     --version 10.10.2 --namespace argocd --values lovely/argocd-values.yaml --wait
    ```
 
-3. `fleet-bootstrap` syncs, creates the `fleet` AppProject and the two
+3. **Install the bootstrap**, with the revision this cluster follows (see
+   [Staged rollout](#staged-rollout-and-rollback)):
+
+   ```sh
+   helm install fleet-bootstrap argocd-apps --repo https://argoproj.github.io/argo-helm \
+     --version 2.0.6 --namespace argocd --values lovely/bootstrap-values.yaml \
+     --set applications.fleet-bootstrap.source.targetRevision=main
+   ```
+
+4. `fleet-bootstrap` syncs, creates the `fleet` AppProject and the two
    ApplicationSets, and they create the cluster's Applications.
 
 Check it with `kubectl -n argocd get applications`: on a us-east cluster
@@ -292,21 +304,28 @@ space is a disk-backed `emptyDir` limited to 2 GiB.
 
 ## Staged rollout and rollback
 
-Every Application of a cluster, and the ApplicationSets themselves, follow
-one Git revision: the Helm value `fleet.revision`. It reaches the
-`fleet-bootstrap` Application directly and the generated Applications as
-`<::REVISION::>`. A cluster never follows `HEAD` unless you give it a
-branch.
+A cluster has one setting for what it runs: the `targetRevision` of its
+`fleet-bootstrap` Application, a branch, tag or commit. The plugin replaces
+`<::REVISION::>` with the commit `fleet-bootstrap` resolved, so the
+ApplicationSets, and every Application they generate, are pinned to that
+exact commit. A cluster therefore always runs one consistent snapshot of
+the repository, even while the branch it follows moves.
 
-- **Rings.** Give each ring its own value: canary clusters
-  `fleet.revision=<commit>`, stable clusters the previous commit or a
-  release tag. To promote, upgrade the next ring's value with `helm upgrade`.
-- **Rollback.** Set `fleet.revision` back to the previous value.
-- **One cluster.** Run `helm upgrade` on that cluster only.
+- **Rings.** Give each ring its own revision: canary clusters a branch or
+  the newest release tag, stable clusters the previous tag. To promote,
+  `helm upgrade fleet-bootstrap` on the next ring with the new revision.
+- **Rollback.** Set the revision back to the previous tag or commit.
+- **One cluster.** Run `helm upgrade` on that cluster only:
 
-Changing `fleet.revision` changes both the sidecar's environment and the
-`fleet-bootstrap` Application, so the pod restarts and everything
-re-renders. No manual refresh is needed.
+  ```sh
+  helm upgrade fleet-bootstrap argocd-apps --repo https://argoproj.github.io/argo-helm \
+    --version 2.0.6 --namespace argocd --values lovely/bootstrap-values.yaml \
+    --set applications.fleet-bootstrap.source.targetRevision=v1.4.0
+  ```
+
+A new revision re-renders `fleet-bootstrap`, which re-pins the
+ApplicationSets, which update their Applications. No manual refresh is
+needed.
 
 ## Changing a cluster's identity
 
@@ -391,7 +410,8 @@ whatever the layout:
 - **Identity values** end up in rendered manifests and Argo CD's UI. Do not
   put secrets in the `cluster-identity` Secret; deliver workload secrets to
   their namespaces directly, for example with External Secrets.
-- **The plugin** substitutes only `GROUP`, `CLUSTER_NAME` and `REVISION`;
+- **The plugin** substitutes only `GROUP`, `CLUSTER_NAME` and `REVISION`
+  (the resolved commit);
   charmap reads nothing else from the environment. argocd-lovely-plugin
   would also accept settings, including commands to run, from an
   Application's `plugin.env`; the `generate` script drops every
@@ -443,6 +463,7 @@ metadata:
   identity or an unknown token stops the render with no output, and
   validates the rendered manifests.
 - **e2e**: `scripts/e2e.sh` installs Argo CD with `lovely/argocd-values.yaml`
+  and the bootstrap with `lovely/bootstrap-values.yaml`
   into a kind cluster whose `argocd` namespace enforces the restricted Pod
   Security Standard. It checks that the fleet comes up from the commit under
   test: the expected Applications, synced and healthy, with the identity and
@@ -460,6 +481,7 @@ metadata:
 | `lovely/bootstrap` | The fleet AppProject and ApplicationSets, rendered through the plugin |
 | `lovely/cmp` | The plugin sidecar image and its `generate` pipeline |
 | `lovely/argocd-values.yaml` | Argo CD Helm values for every lovely cluster |
+| `lovely/bootstrap-values.yaml` | argocd-apps values: the `fleet-bootstrap` Application and its AppProject |
 | `scripts/render-test.sh` | Renders every lovely Application in the plugin image |
 | `scripts/e2e.sh` | Installs and checks the lovely fleet in a disposable cluster |
 

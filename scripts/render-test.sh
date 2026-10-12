@@ -13,6 +13,8 @@ image=${1:?usage: render-test.sh CMP_IMAGE [OUT_DIR]}
 out=${2:-}
 repo=$(git rev-parse --show-toplevel)
 script=$(yq '.spec.generate.args[0]' "$repo/lovely/cmp/plugin.yaml")
+# The commit Argo CD would have resolved for the Application being rendered.
+revision=0123456789abcdef0123456789abcdef01234567
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -37,8 +39,9 @@ run_plugin() {
   shift 3
   docker run --rm --read-only --tmpfs /tmp --user "$(id -u):$(id -g)" "$@" \
     -v "$work/repo:/repo" -w "/repo/$path" \
-    -e GROUP="$group" -e CLUSTER_NAME="$cluster" -e REVISION=main -e RENDER_ROOT=lovely \
-    -e ARGOCD_APP_SOURCE_PATH="$path" -e KUBE_VERSION=1.35.0 -e KUBE_API_VERSIONS=v1,apps/v1 \
+    -e GROUP="$group" -e CLUSTER_NAME="$cluster" -e RENDER_ROOT=lovely \
+    -e ARGOCD_APP_SOURCE_PATH="$path" -e ARGOCD_APP_REVISION="$revision" \
+    -e KUBE_VERSION=1.35.0 -e KUBE_API_VERSIONS=v1,apps/v1 \
     --entrypoint bash "$image" -c "$script"
 }
 
@@ -71,7 +74,11 @@ for identity in us-east:cluster-001 eu-west:cluster-003; do
 
   bootstrap=$(render "$group" "$cluster" lovely/bootstrap)
   grep -q "path: lovely/groups/$group/addons/\*" <<<"$bootstrap" || fail "bootstrap does not select $group addons"
-  grep -q 'targetRevision: main' <<<"$bootstrap" || fail "bootstrap does not pin the revision"
+  # Each ApplicationSet pins its generator (revision) and its template
+  # (targetRevision) to the resolved commit.
+  [[ $(grep -cE "^ +revision: $revision$" <<<"$bootstrap") == 2 &&
+    $(grep -cE "^ +targetRevision: $revision$" <<<"$bootstrap") == 2 ]] ||
+    fail "bootstrap does not pin both ApplicationSets to the resolved commit"
   base=$(render "$group" "$cluster" lovely/apps/base/monitoring)
   grep -q "group: \"\?$group\"\?" <<<"$base" || fail "monitoring is not labelled with group $group"
   grep -q "cluster: \"\?$cluster\"\?" <<<"$base" || fail "monitoring is not labelled with cluster $cluster"

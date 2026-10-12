@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Installs Argo CD with lovely/argocd-values.yaml into the current kubectl
-# context and checks the fleet comes up from REVISION for one example
-# identity (us-east, cluster-001). The argocd namespace enforces the
+# Installs Argo CD with lovely/argocd-values.yaml and the fleet-bootstrap
+# release with lovely/bootstrap-values.yaml into the current kubectl context,
+# and checks the fleet comes up from REVISION (a full commit SHA) for one
+# example identity (us-east, cluster-001). The argocd namespace enforces the
 # restricted Pod Security Standard, so the install itself fails if any
 # container, the plugin sidecar included, is not hardened.
 #
@@ -17,7 +18,8 @@ fi
 
 image=${1:?usage: e2e.sh CMP_IMAGE REVISION}
 revision=${2:?usage: e2e.sh CMP_IMAGE REVISION}
-chart_version=${ARGO_CD_CHART_VERSION:-10.10.2}
+argo_cd_chart=${ARGO_CD_CHART_VERSION:-10.10.2}
+argocd_apps_chart=${ARGOCD_APPS_CHART_VERSION:-2.0.6}
 repo=$(git rev-parse --show-toplevel)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -39,9 +41,11 @@ kubectl -n argocd create secret generic cluster-identity \
 
 IMAGE=$image yq '.repoServer.extraContainers[0].image = strenv(IMAGE)' \
   "$repo/lovely/argocd-values.yaml" >"$work/values.yaml"
-helm install argocd argo-cd --repo https://argoproj.github.io/argo-helm --version "$chart_version" \
-  --namespace argocd --values "$work/values.yaml" --set "fleet.revision=$revision" \
-  --wait --timeout 10m
+helm install argocd argo-cd --repo https://argoproj.github.io/argo-helm --version "$argo_cd_chart" \
+  --namespace argocd --values "$work/values.yaml" --wait --timeout 10m
+helm install fleet-bootstrap argocd-apps --repo https://argoproj.github.io/argo-helm --version "$argocd_apps_chart" \
+  --namespace argocd --values "$repo/lovely/bootstrap-values.yaml" \
+  --set "applications.fleet-bootstrap.source.targetRevision=$revision"
 
 # wait_app NAME: waits for an Application to exist, then to be synced and healthy.
 wait_app() {
