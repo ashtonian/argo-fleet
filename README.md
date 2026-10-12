@@ -1,150 +1,114 @@
-# ArgoCD ApplicationSet Patterns
+# Argo CD fleet patterns
 
-Three approaches for managing app deployment across a large cluster fleet using ArgoCD ApplicationSets and Kustomize.
+Three ways to run the same applications across a fleet of Kubernetes
+clusters with Argo CD ApplicationSets, from one Git repository: base
+applications on every cluster, per-group overrides, and addons on selected
+clusters.
 
-Each cluster runs its own ArgoCD instance, bootstrapped with cluster identity as environment variables (`CLUSTER_NAME`, `GROUP`, etc.). All instances point at a single shared git repo. This gives you centralized management — one repo controls what runs everywhere — while keeping each cluster's reconciliation loop independent and self-contained.
-
-Uses [crumbhole/argocd-lovely-plugin](https://github.com/crumbhole/argocd-lovely-plugin) and [ashtonian/charmap](https://github.com/ashtonian/charmap) for template variable substitution in Approach 3.
-
-**Goal:** Base apps on every cluster, per-group overrides, and selective addons per cluster.
-
-## Summary
-
-| | Overlay | Matrix | Lovely + Charmap |
+| | [Overlay](#approach-1-overlay) | [Matrix](#approach-2-matrix) | [Lovely + charmap](#approach-3-lovely--charmap) |
 |---|---|---|---|
-| **Mechanism** | Git directory generator | Matrix generator + kustomize overlays per group | Simple directory generator + CMP template substitution |
-| **Base app selection** | Directory presence per cluster | Directory presence per group | All base apps auto-deploy to all clusters |
-| **Group overrides** | Manual per-cluster patches | Kustomize overlays shared per group | `<::VAR::>` template markers resolved at render time |
-| **Addon selection** | Directory presence per cluster | Directory presence per cluster | Directory presence per group |
-| **Cluster identity** | Hardcoded per cluster | `config.yaml` per cluster | ArgoCD env vars (set at bootstrap) |
-| **Per-cluster git dirs** | N (one per app per cluster) | 1 (config.yaml + optional addons) | 0 |
-| **ApplicationSets** | 1 per cluster | 2 total | 2 total |
-| **Add a cluster** | Create N app overlay dirs | Create 1 `config.yaml` | Bootstrap ArgoCD with env vars (no git change) |
-| **Add a base app** | Touch every cluster dir | Add 1 kustomization per group | Add 1 app dir (done) |
-| **Add a group** | N/A | Create group dir + N kustomizations | Create group dir + addon selection |
-| **Best for** | < 10 clusters | 10-100 clusters | 100+ clusters |
+| **Topology** | Argo CD in every cluster | One hub Argo CD deploying to every cluster | Argo CD in every cluster |
+| **Mechanism** | Git directory generator over a per-cluster directory | Matrix of a per-cluster `config.yaml` and per-group Kustomize overlays | Git directory generators; cluster identity substituted into manifests by a Config Management Plugin |
+| **Cluster identity** | The cluster's directory path, set in its ApplicationSet | `matrix/clusters/<cluster>/config.yaml` | A `cluster-identity` Secret in the cluster (can come from a secrets manager) |
+| **Base applications** | Listed per cluster | All, through the cluster's group overlay | All |
+| **Group overrides** | Patches in each cluster's overlays | Kustomize overlay per group and application | `<::GROUP::>` tokens in manifests; Kustomize for structure |
+| **Addon selection** | Per cluster (directory presence) | Per cluster (directory presence) | Per group (directory presence) |
+| **Add a cluster** | A directory per application, plus an ApplicationSet | One `config.yaml`, plus registering the cluster with the hub | Install Argo CD with the shared values and a Secret; no Git change |
+| **Add a base application** | A directory in every cluster | A directory in every group | One directory |
+| **Per-cluster exceptions** | Yes | Yes (addons) | No; selection is per group |
 
-### Directory count at scale (20 base apps / 5 addons / 5 groups)
+The [scale section](#scale) explains why directory count is not the only
+cost that grows with the fleet.
+
+### Directories to maintain
+
+Counting every application directory (each a `kustomization.yaml`) and
+per-cluster directory, for 20 base applications, 5 addons, 5 groups, an
+average of 2 addons per cluster (overlay, matrix) or per group (lovely):
 
 | Clusters | Overlay | Matrix | Lovely |
 |---|---|---|---|
-| **10** | 220 | 130 | 30 |
-| **500** | 10,520 | 1,620 | 30 |
-| **10,000** | 200,020 | 11,120 | 30 |
+| 10 | 245 | 155 | 35 |
+| 500 | 11,025 | 1,625 | 35 |
+| 10,000 | 220,025 | 30,125 | 35 |
 
 <details>
-<summary>Breakdown</summary>
-
-Assumptions: 20 base apps, 5 addons, 5 groups, avg 2 addons per group.
+<summary>How the numbers are derived</summary>
 
 | Component | Overlay | Matrix | Lovely |
 |---|---|---|---|
-| Base app definitions | 20 | 20 | 20 |
-| Group overlay dirs | — | 5 x 20 = 100 | — |
-| Per-cluster dirs | N x 20 | N | 0 |
-| Addon dirs | (included above) | (included above) | 5 x 2 = 10 |
-| ApplicationSets | N | 2 | 2 |
+| Application definitions (20 base + 5 addons) | 25 | 25 | 25 |
+| Group overlays (5 groups × 20 base) | | 100 | |
+| Group addon selections (5 groups × 2) | | | 10 |
+| Per cluster | 20 base + 2 addons = 22 | `config.yaml` directory + 2 addons = 3 | 0 |
+| **Total for N clusters** | 25 + 22N | 125 + 3N | 35 |
 
-Overlay and Matrix scale linearly with cluster count. Lovely is constant — cluster identity comes from ArgoCD env vars, not git.
+Lovely moves per-cluster state out of Git into a Secret in each cluster, so
+its count does not grow with the fleet. The Secrets still have to be
+managed, for example from a secrets manager.
 
 </details>
 
 ---
 
-## Approach 1: Overlay (`overlay/`)
+## Approach 1: Overlay
 
-Git directory generator scans a per-cluster overlay directory. Each subdirectory becomes an Application. Directory presence = deployment.
-
-### Structure
+`overlay/`. Every cluster runs its own Argo CD with its own copy of
+`overlay/applicationset.yaml`, pointed at its own directory under
+`overlay/clusters/`. Each subdirectory there is a Kustomize overlay of a base
+application, and becomes one Application.
 
 ```
 overlay/
-├── apps/                              # Base app definitions
-│   ├── monitoring/
-│   ├── ingress/
-│   ├── logging/
-│   ├── gpu-operator/                  # Available but not deployed everywhere
-│   └── edge-cache/
+├── apps/                    # base application definitions
+│   ├── monitoring/  ingress/  logging/  gpu-operator/  edge-cache/
 ├── clusters/
-│   └── cluster-001/                       # Only apps this cluster should run
-│       ├── monitoring/
-│       │   └── kustomization.yaml     # refs ../../../apps/monitoring
+│   └── cluster-001/         # only the applications this cluster runs
+│       ├── monitoring/kustomization.yaml   # resources: ../../../apps/monitoring
 │       ├── ingress/
-│       │   └── kustomization.yaml
 │       └── logging/
-│           └── kustomization.yaml
-└── applicationset.yaml
+└── applicationset.yaml      # AppProject + ApplicationSet for cluster-001
 ```
 
-### ApplicationSet
+To add an application to a cluster, add its overlay directory. To patch it
+for one cluster, add a patch to that overlay.
 
-```yaml
-generators:
-  - git:
-      directories:
-        - path: overlay/clusters/cluster-001/*
-```
+| For | Against |
+|---|---|
+| Plain Kustomize, easy to read | A directory per application per cluster |
+| Any per-cluster patch | Each cluster needs its own ApplicationSet path |
+| | Shared changes touch every cluster's directory |
 
-Each cluster-app overlay is a `kustomization.yaml` referencing the base app. Can add patches per cluster. To add an app: create the directory. To remove: delete it (auto-sync prunes).
+## Approach 2: Matrix
 
-### Trade-offs
-
-| Pro | Con |
-|-----|-----|
-| Simple to understand | One ApplicationSet per cluster |
-| Standard kustomize patterns | No cluster parameter injection |
-| Overlays can patch base apps | Per-cluster dirs needed for every app |
-
----
-
-## Approach 2: Matrix (`matrix/`)
-
-Matrix generator combines cluster identity (from `config.yaml` files) with app discovery. Two layers: base apps through group overlays, and selective addons per cluster.
-
-### Structure
+`matrix/`. A hub-and-spoke layout: one Argo CD instance deploys to every
+cluster listed under `matrix/clusters/`. Each of those clusters must be
+registered with the hub (a cluster Secret whose server matches
+`cluster_server` in its `config.yaml`). Installing these ApplicationSets in
+every cluster's own Argo CD would make each of them try to deploy to the
+whole fleet.
 
 ```
 matrix/
 ├── apps/
-│   ├── base/                          # Deployed to ALL clusters
-│   │   ├── monitoring/
-│   │   ├── ingress/
-│   │   └── logging/
-│   └── addons/                        # Deployed selectively
-│       ├── gpu-operator/
-│       └── edge-cache/
-├── groups/                            # Per-group kustomize overlays
-│   ├── us-east/
-│   │   ├── config.yaml
-│   │   └── apps/
-│   │       ├── monitoring/
-│   │       │   └── kustomization.yaml # refs base + group patches
-│   │       ├── ingress/
-│   │       └── logging/
-│   └── eu-west/
-│       ├── config.yaml
-│       └── apps/...
-├── clusters/                          # Per-cluster identity + addon selection
+│   ├── base/                # deployed to every cluster
+│   └── addons/              # deployed where a cluster opts in
+├── groups/
+│   ├── us-east/apps/<app>/kustomization.yaml   # base + us-east patches
+│   └── eu-west/apps/<app>/kustomization.yaml
+├── clusters/
 │   ├── cluster-001/
-│   │   ├── config.yaml                # cluster_name, group, cluster_server
+│   │   ├── config.yaml      # cluster_name, group, cluster_server
 │   │   └── addons/gpu-operator/
-│   ├── cluster-002/
-│   │   └── config.yaml
+│   ├── cluster-002/config.yaml
 │   └── cluster-003/
 │       ├── config.yaml
 │       └── addons/{gpu-operator,edge-cache}/
-└── applicationsets.yaml
+└── applicationsets.yaml     # AppProject + two ApplicationSets
 ```
 
-### Cluster Config
-
-```yaml
-cluster_name: cluster-001
-group: us-east
-cluster_server: https://cluster-001.example.com
-```
-
-### ApplicationSet 1: Base Apps
+Each ApplicationSet is a matrix of two Git generators: the cluster configs,
+and the application directories selected by a value from each config.
 
 ```yaml
 generators:
@@ -152,88 +116,89 @@ generators:
       generators:
         - git:
             files:
-              - path: matrix/clusters/*/config.yaml        # → cluster_name, group, cluster_server
+              - path: matrix/clusters/*/config.yaml   # cluster_name, group, cluster_server
+            pathParamPrefix: cluster
         - git:
             directories:
-              - path: 'matrix/groups/{{.group}}/apps/*'    # scoped by group from Generator 1
+              - path: "matrix/groups/{{.group}}/apps/*"
+            pathParamPrefix: app
 ```
 
-Generator 1 reads cluster configs. Generator 2 uses `{{.group}}` to scan that group's app overlays. Every cluster gets all base apps rendered through its group's kustomize overlay.
+Both Git generators emit `path` parameters. Without `pathParamPrefix`, the
+cluster config's `path` overwrites the application's, and every generated
+Application would point at a cluster directory. With it, the template uses
+`{{.app.path.path}}` and `{{.app.path.basename}}`.
 
-### ApplicationSet 2: Cluster Addons
+The result for the example clusters, 12 Applications:
 
-```yaml
-generators:
-  - matrix:
-      generators:
-        - git:
-            files:
-              - path: matrix/clusters/*/config.yaml
-        - git:
-            directories:
-              - path: 'matrix/clusters/{{.cluster_name}}/addons/*'
-```
+| Cluster | Group | Base applications | Addons |
+|---|---|---|---|
+| cluster-001 | us-east | monitoring, ingress, logging | gpu-operator |
+| cluster-002 | us-east | monitoring, ingress, logging | none |
+| cluster-003 | eu-west | monitoring, ingress, logging | gpu-operator, edge-cache |
 
-Only clusters with an `addons/<app>/` directory get that addon deployed.
+| For | Against |
+|---|---|
+| Two ApplicationSets for the whole fleet | The hub holds credentials for every cluster and is a single point of failure |
+| Full Kustomize per group | Every base application needs an overlay per group |
+| Adding a cluster is one `config.yaml` | Each cluster must also be registered with the hub |
 
-### Result
+## Approach 3: Lovely + charmap
 
-| Cluster | Base Apps | Addons | Group |
-|---------|-----------|--------|-------|
-| cluster-001 | monitoring, ingress, logging | gpu-operator | us-east |
-| cluster-002 | monitoring, ingress, logging | _(none)_ | us-east |
-| cluster-003 | monitoring, ingress, logging | gpu-operator, edge-cache | eu-west |
-
-**11 Applications** from 2 ApplicationSets.
-
-### Trade-offs
-
-| Pro | Con |
-|-----|-----|
-| 2 ApplicationSets for all clusters | Per-group overlay dirs for every base app |
-| Cluster params from config files | Adding a base app touches every group |
-| Full kustomize power per group | More directory indirection |
-| Adding a cluster = 1 config.yaml | Group must exist before clusters reference it |
-
----
-
-## Approach 3: Lovely + Charmap (`lovely/`)
-
-**argocd-lovely-plugin + charmap** for template variable substitution. Each cluster runs its own ArgoCD instance with cluster identity (`CLUSTER_NAME`, `GROUP`, etc.) set as environment variables at bootstrap. Base app manifests contain `<::VAR::>` markers resolved at render time — **no per-cluster directories and no per-group overlay directories needed**.
-
-Since ArgoCD runs independently per cluster, the base app ApplicationSet is a simple directory generator — no matrix needed. Addons are selected at the group level.
-
-### Structure
+`lovely/`. Every cluster runs its own Argo CD, installed with the same Helm
+values (`lovely/argocd-values.yaml`). Cluster identity lives in the cluster,
+in a `cluster-identity` Secret, not in Git. Manifests carry
+`<::GROUP::>` and `<::CLUSTER_NAME::>` tokens. A Config Management Plugin
+sidecar replaces them with
+[charmap](https://github.com/ashtonian/charmap) and then renders with
+[argocd-lovely-plugin](https://github.com/crumbhole/argocd-lovely-plugin),
+which runs Kustomize or Helm as each directory needs.
 
 ```
 lovely/
 ├── apps/
-│   ├── base/                          # Deployed to ALL clusters (templated)
-│   │   ├── monitoring/
-│   │   │   ├── deployment.yaml        # Uses <::GROUP::>, <::CLUSTER_NAME::>
-│   │   │   └── kustomization.yaml
-│   │   ├── ingress/
-│   │   └── logging/
-│   └── addons/                        # Addon definitions
-│       ├── gpu-operator/
-│       └── edge-cache/
-├── groups/                            # Addon selection per group
-│   ├── us-east/
-│   │   └── addons/
-│   │       └── gpu-operator/
-│   │           └── kustomization.yaml # refs ../../../apps/addons/gpu-operator
-│   └── eu-west/
-│       └── addons/
-│           ├── gpu-operator/
-│           │   └── kustomization.yaml
-│           └── edge-cache/
-│               └── kustomization.yaml
-└── applicationsets.yaml
+│   ├── base/                # every cluster; manifests use <::GROUP::>, <::CLUSTER_NAME::>
+│   └── addons/              # addon definitions
+├── groups/
+│   ├── us-east/addons/gpu-operator/              # resources: ../../../../apps/addons/gpu-operator
+│   └── eu-west/addons/{gpu-operator,edge-cache}/
+├── bootstrap/               # rendered by the plugin through the fleet-bootstrap Application
+│   ├── project.yaml         # AppProject "fleet"
+│   └── applicationsets.yaml # fleet-base, fleet-group-addons
+├── cmp/                     # the plugin sidecar image
+│   ├── Dockerfile
+│   └── plugin.yaml
+└── argocd-values.yaml       # Argo CD Helm values, the same for every cluster
 ```
 
-No `clusters/` directory. Cluster identity comes from ArgoCD's own environment variables, set during cluster bootstrap (Terraform, Ansible, etc.). Adding a new cluster is a bootstrap operation — no git change required.
+### How it fits together
 
-### Templated Manifests
+1. Bootstrap creates the `cluster-identity` Secret and installs Argo CD with
+   `lovely/argocd-values.yaml`. The values add the plugin sidecar, whose
+   environment holds `GROUP` and `CLUSTER_NAME` from the Secret and
+   `REVISION` from `fleet.revision`. They also create the `fleet-bootstrap`
+   Application.
+2. `fleet-bootstrap` renders `lovely/bootstrap` through the plugin, so the
+   tokens in the ApplicationSets are replaced before the ApplicationSet
+   controller reads them. The addon generator's path becomes
+   `lovely/groups/us-east/addons/*` on a us-east cluster. A generator path
+   is never rendered by a plugin on its own, so applying
+   `applicationsets.yaml` directly would leave the token in place and match
+   nothing.
+3. The ApplicationSets generate `base-<app>` and `addon-<app>` Applications.
+   Each one names the plugin (`plugin.name: lovely-charmap`), which replaces
+   the tokens in its manifests and renders them.
+
+The plugin's `generate` script (`lovely/cmp/plugin.yaml`) stops on any
+failure: an unset or empty identity value, an unknown or malformed token, or
+a rendering error. The Application then shows the error, with the file,
+line and column of a bad token, and nothing is applied. charmap replaces
+tokens across the whole `fleet.renderRoot` directory (`lovely/`), not just
+the Application's own directory. Tokens in a base referenced by relative
+path, such as the group addons' `../../../../apps/addons/...`, are therefore
+replaced too. Every render works on a private copy of the repository.
+
+### Templated manifests
 
 ```yaml
 apiVersion: apps/v1
@@ -244,85 +209,202 @@ metadata:
     app: monitoring
     group: "<::GROUP::>"
     cluster: "<::CLUSTER_NAME::>"
-spec:
-  template:
-    metadata:
-      labels:
-        group: "<::GROUP::>"
-        cluster: "<::CLUSTER_NAME::>"
-    spec:
-      containers:
-        - name: monitoring
-          command: ['sh', '-c', 'echo "monitoring on <::CLUSTER_NAME::> (<::GROUP::>)"']
 ```
 
-### ApplicationSet 1: Base Apps
+Tokens are plain string substitution. For structural differences between
+groups, use Kustomize in the application's directory, or a group-specific
+addon directory.
+
+| For | Against |
+|---|---|
+| No per-cluster or per-group overlay directories | Needs the plugin sidecar image |
+| Adding a cluster changes nothing in Git | String substitution only; structure needs Kustomize |
+| Adding a base application is one directory | Addons are selected per group, not per cluster |
+| Cluster identity can come from a secrets manager | Rendered output exists only inside Argo CD; diff it with the plugin image (see CI) |
+
+## Bootstrapping a cluster (lovely)
+
+1. **Create the identity Secret** in the `argocd` namespace, before
+   installing Argo CD, since the sidecar reads it at start:
+
+   ```sh
+   kubectl create namespace argocd
+   kubectl -n argocd create secret generic cluster-identity \
+     --from-literal=group=us-east \
+     --from-literal=cluster-name=cluster-001
+   ```
+
+   Or have [External Secrets](https://external-secrets.io/) write it from a
+   secrets manager:
+
+   ```yaml
+   apiVersion: external-secrets.io/v1
+   kind: ExternalSecret
+   metadata:
+     name: cluster-identity
+     namespace: argocd
+   spec:
+     refreshInterval: 1h
+     secretStoreRef:
+       kind: ClusterSecretStore
+       name: fleet
+     target:
+       name: cluster-identity
+     data:
+       - secretKey: group
+         remoteRef: {key: fleet/cluster-identity, property: group}
+       - secretKey: cluster-name
+         remoteRef: {key: fleet/cluster-identity, property: cluster-name}
+   ```
+
+2. **Install Argo CD** with the shared values and the cluster's revision:
+
+   ```sh
+   helm install argocd argo-cd --repo https://argoproj.github.io/argo-helm \
+     --version 10.10.2 --namespace argocd \
+     --values lovely/argocd-values.yaml --set fleet.revision=main
+   ```
+
+3. `fleet-bootstrap` syncs, creates the `fleet` AppProject and the two
+   ApplicationSets, and they create the cluster's Applications.
+
+Check it with `kubectl -n argocd get applications`: on a us-east cluster
+you see `fleet-bootstrap`, `base-ingress`, `base-logging`, `base-monitoring`
+and `addon-gpu-operator`.
+
+## The plugin sidecar image
+
+`lovely/cmp/Dockerfile` builds `ghcr.io/ashtonian/argo-fleet-lovely-cmp`
+from the argocd-lovely-plugin CMP image, adding charmap and
+`lovely/cmp/plugin.yaml`. The binaries and the pipeline that runs them ship
+as one image: a plugin change rolls the repo-server pod, and nothing is
+copied in at pod start.
+
+To publish, push a tag `cmp-v<version>` (for example `cmp-v1.0.1`). The
+`CMP image` workflow builds linux/amd64 and linux/arm64, checks each runs a
+charmap built for its platform, and prints the digest. Pin
+`repoServer.extraContainers[0].image` in `lovely/argocd-values.yaml` to it.
+
+The sidecar runs as UID 999 with a read-only root filesystem, no
+capabilities and the RuntimeDefault seccomp profile. It meets the restricted
+Pod Security Standard, which the CI end-to-end test enforces. Its scratch
+space is a disk-backed `emptyDir` limited to 2 GiB.
+
+## Staged rollout and rollback
+
+Every Application of a cluster, and the ApplicationSets themselves, follow
+one Git revision: the Helm value `fleet.revision`. It reaches the
+`fleet-bootstrap` Application directly and the generated Applications as
+`<::REVISION::>`. A cluster never follows `HEAD` unless you give it a
+branch.
+
+- **Rings.** Give each ring its own value: canary clusters
+  `fleet.revision=<commit>`, stable clusters the previous commit or a
+  release tag. To promote, upgrade the next ring's value with `helm upgrade`.
+- **Rollback.** Set `fleet.revision` back to the previous value.
+- **One cluster.** Run `helm upgrade` on that cluster only.
+
+Changing `fleet.revision` changes both the sidecar's environment and the
+`fleet-bootstrap` Application, so the pod restarts and everything
+re-renders. No manual refresh is needed.
+
+## Changing a cluster's identity
+
+`GROUP` and `CLUSTER_NAME` are read from the Secret when the sidecar
+starts, and Argo CD's manifest cache key does not include the sidecar's
+environment. After changing the Secret:
+
+1. Restart the repo-server: `kubectl -n argocd rollout restart deployment argocd-repo-server`.
+2. Hard-refresh every Application so it re-renders:
+
+   ```sh
+   kubectl -n argocd get applications -o name |
+     xargs -I{} kubectl -n argocd annotate {} argocd.argoproj.io/refresh=hard --overwrite
+   ```
+
+When a cluster moves to another group, the new group's addons are created,
+but the old group's addons stay, because ApplicationSets never delete
+(below). Remove them on purpose.
+
+## Deletion safety
+
+A shrinking generator result must not delete workloads. A directory rename,
+a deleted `config.yaml` or a mistyped group would otherwise remove
+applications from every affected cluster. So:
+
+- Every ApplicationSet sets `applicationsSync: create-update` (it never
+  deletes Applications) and `preserveResourcesOnDeletion: true` (its
+  Applications carry no resources finalizer).
+- The lovely values also set `applicationsetcontroller.policy: create-update`
+  on the controller, which overrides any ApplicationSet's own policy.
+- `goTemplateOptions: ["missingkey=error"]` makes a missing parameter an
+  error instead of an empty string.
+- `fleet-bootstrap` does not prune, since pruning an ApplicationSet would
+  delete every Application it owns.
+
+To retire an application: remove its directory, then delete its
+Application together with its resources with
+`argocd app delete <name> --cascade`.
+
+## Failure behaviour (lovely)
+
+| What goes wrong | What you see | What is applied |
+|---|---|---|
+| `cluster-identity` missing a key | The repo-server pod does not start (`CreateContainerConfigError`) | Nothing changes |
+| Identity value empty | Application `ComparisonError`: `GROUP: parameter null or not set` | Nothing changes |
+| Unknown or malformed token anywhere under `fleet.renderRoot` | Application `ComparisonError` naming `path:line:column` | Nothing changes |
+| Plugin sidecar missing or misnamed | Application `ComparisonError`: plugin not found | Nothing changes; no fallback renderer |
+| Generator matches nothing (typo, rename) | Fewer Applications generated | Existing Applications and resources stay |
+| A sync fails | Retried 5 times with backoff up to 5 minutes, then shown as failed | The previous state stays |
+
+## Scale
+
+Directory count is one cost. Others grow with the number of clusters
+whatever the layout:
+
+- **Git polling.** Every Argo CD instance polls the repository: by default
+  ApplicationSet generators every 3 minutes, and Applications every 2
+  minutes plus up to 1 minute of jitter. At even one fetch per instance in
+  that window, 10,000 clusters make 55 to 83 fetches per second. GitHub
+  [recommends at most 15 Git read operations per second](https://docs.github.com/en/repositories/creating-and-managing-repositories/repository-limits)
+  per repository. Beyond a few hundred clusters, serve the repository from
+  read-only mirrors near the clusters, or publish releases as OCI artifacts.
+  Use a webhook relay rather than shorter polling intervals.
+- **Rendering.** Each render through the plugin streams the repository to
+  the sidecar. The values exclude `.git`; keep the rest of the repository
+  small, or exclude more with `reposerver.plugin.tar.exclusions`.
+- **Applications.** Each cluster's Argo CD reconciles only its own
+  Applications, so per-cluster cost stays flat. Fleet-wide cost is linear
+  in clusters × applications.
+
+## Security
+
+- **Repository writers deploy to every cluster.** Protect the default
+  branch and the revisions clusters follow; staged rollout limits how many
+  clusters a bad change reaches before it is caught.
+- **AppProjects** limit what the generated Applications can do: `fleet`,
+  `overlay` and `matrix` allow only this repository as a source, refuse the
+  `argocd` and `kube-*` namespaces, and allow no cluster-scoped resource
+  except a Namespace. `fleet-bootstrap` may only manage the fleet's
+  AppProject and ApplicationSets. An operator that needs CRDs or
+  ClusterRoles belongs in its own project.
+- **Identity values** end up in rendered manifests and Argo CD's UI. Do not
+  put secrets in the `cluster-identity` Secret; deliver workload secrets to
+  their namespaces directly, for example with External Secrets.
+- **The plugin** substitutes only `GROUP`, `CLUSTER_NAME` and `REVISION`;
+  charmap reads nothing else from the environment. argocd-lovely-plugin
+  would also accept settings, including commands to run, from an
+  Application's `plugin.env`; the `generate` script drops every
+  Application-supplied variable first, so only the sidecar's own
+  configuration applies.
+
+## Group overrides
+
+Approach 2 uses a Kustomize overlay per group, with full structural power
+(patches, replicas, resources, images):
 
 ```yaml
-generators:
-  - git:
-      directories:
-        - path: lovely/apps/base/*
-```
-
-No matrix. No per-cluster config. Every ArgoCD instance deploys all base apps. Charmap resolves `<::GROUP::>`, `<::CLUSTER_NAME::>`, etc. from the env vars already configured on the ArgoCD repo-server.
-
-### ApplicationSet 2: Group Addons
-
-```yaml
-generators:
-  - git:
-      directories:
-        - path: 'lovely/groups/<::GROUP::>/addons/*'
-```
-
-The `<::GROUP::>` in the ApplicationSet path is resolved by charmap from the ArgoCD instance's env. Each cluster's ArgoCD only sees addons for its own group.
-
-### CMP Configuration
-
-The ArgoCD repo-server needs a CMP sidecar running lovely + charmap, with cluster identity injected as env vars. See [`lovely/argocd-values.yaml`](lovely/argocd-values.yaml) for the full ArgoCD Helm chart values showing:
-
-- Init container that installs the charmap binary
-- CMP sidecar running argocd-lovely-plugin
-- ConfigMap defining the generate pipeline (charmap substitutes `<::VAR::>` markers, then lovely runs kustomize/helm)
-- Env vars sourced from a `cluster-identity` Secret (set per-cluster at bootstrap)
-
-The charmap generate command passes through each variable:
-
-```sh
-charmap --mode flag \
-  --set GROUP=${GROUP} \
-  --set CLUSTER_NAME=${CLUSTER_NAME} \
-```
-
-This is the same Helm values structure across all clusters — only the Secret values differ.
-
-### Result
-
-Each cluster deploys all base apps plus its group's addons. No per-cluster git state needed.
-
-### Trade-offs
-
-| Pro | Con |
-|-----|-----|
-| Near-zero git dirs — no per-cluster state | Requires argocd-lovely-plugin + charmap CMP |
-| Adding a cluster = bootstrap only, no git change | String substitution only (no structural transforms) |
-| Adding a base app = 1 dir, all clusters get it | CMP config must declare each passthrough variable |
-| Addon selection at group level scales to thousands | Per-cluster addon exceptions require additional mechanism |
-| Kustomize still available for structural changes | Harder to diff rendered output without running charmap |
-
----
-
-## Group Overrides
-
-**Approach 2** uses kustomize overlays per group — full structural power (patches, replicas, resource overrides, image swaps).
-
-**Approach 3** uses template variables for string values (labels, annotations, config endpoints, DNS suffixes). For structural changes, combine with kustomize patches in the base app's `kustomization.yaml`.
-
-Example group overlay (Approach 2):
-
-```yaml
-# groups/us-east/apps/monitoring/kustomization.yaml
+# matrix/groups/us-east/apps/monitoring/kustomization.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -337,11 +419,50 @@ patches:
         value: us-east
 ```
 
-Equivalent in Approach 3 — no overlay file needed, just a template marker in the base manifest:
+Approach 3 does the same for string values with a token in the base
+manifest, and needs no overlay:
 
 ```yaml
-# apps/base/monitoring/deployment.yaml
+# lovely/apps/base/monitoring/deployment.yaml
 metadata:
   labels:
     group: "<::GROUP::>"
 ```
+
+## CI
+
+`.github/workflows/ci.yaml` runs on every pull request and push to `main`:
+
+- **static**: actionlint; shellcheck on the scripts and the plugin's
+  `generate` script; `kustomize build` of every application; ApplicationSets
+  and AppProjects validated against Argo CD's CRD schemas.
+- **render**: builds the plugin image and runs `scripts/render-test.sh`.
+  That renders every lovely Application inside the image, for a us-east and
+  an eu-west identity, with a read-only root filesystem as in the sidecar. It
+  fails on any error or leftover token. It also checks that an empty
+  identity or an unknown token stops the render with no output, and
+  validates the rendered manifests.
+- **e2e**: `scripts/e2e.sh` installs Argo CD with `lovely/argocd-values.yaml`
+  into a kind cluster whose `argocd` namespace enforces the restricted Pod
+  Security Standard. It checks that the fleet comes up from the commit under
+  test: the expected Applications, synced and healthy, with the identity and
+  revision on the workloads.
+
+`.github/workflows/cmp-image.yaml` publishes the plugin image (see above).
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `overlay/` | Approach 1: base applications, per-cluster overlays, AppProject and ApplicationSet |
+| `matrix/` | Approach 2: base applications and addons, group overlays, cluster configs, AppProject and ApplicationSets |
+| `lovely/apps`, `lovely/groups` | Approach 3: templated base applications, addon definitions, addon selection per group |
+| `lovely/bootstrap` | The fleet AppProject and ApplicationSets, rendered through the plugin |
+| `lovely/cmp` | The plugin sidecar image and its `generate` pipeline |
+| `lovely/argocd-values.yaml` | Argo CD Helm values for every lovely cluster |
+| `scripts/render-test.sh` | Renders every lovely Application in the plugin image |
+| `scripts/e2e.sh` | Installs and checks the lovely fleet in a disposable cluster |
+
+The example workloads are placeholder Deployments (`busybox` printing a
+message), there to show delivery, not working monitoring, ingress or GPU
+operators.

@@ -1,0 +1,29 @@
+# The Config Management Plugin baked into the sidecar image (see Dockerfile).
+# There is no discover section: an Application uses this plugin only when its
+# source names it (plugin.name: lovely-charmap), so it never renders an
+# Application by accident and a missing sidecar is an error, not a fallback.
+apiVersion: argoproj.io/v1alpha1
+kind: ConfigManagementPlugin
+metadata:
+  name: lovely-charmap
+spec:
+  generate:
+    command: [bash, -c]
+    args:
+      - |
+        set -euo pipefail
+        # Applications cannot change the pipeline: drop any plugin environment
+        # an Application sets (ARGOCD_ENV_*), which argocd-lovely-plugin would
+        # otherwise read, including commands for it to run.
+        while IFS= read -r name; do unset "$name"; done < <(compgen -e | grep '^ARGOCD_ENV_' || true)
+        # Cluster identity comes from the sidecar's environment, which
+        # argocd-values.yaml fills from the cluster-identity Secret. An unset
+        # or empty value stops the render instead of producing empty labels.
+        : "${GROUP:?}" "${CLUSTER_NAME:?}" "${REVISION:?}" "${RENDER_ROOT:?}"
+        # Substitute across RENDER_ROOT rather than only this Application's
+        # directory, so tokens in bases it references by relative path are
+        # replaced too. Each render works on a private copy of the repository.
+        repo_root=${PWD%"/$ARGOCD_APP_SOURCE_PATH"}
+        charmap render --dir "$repo_root/$RENDER_ROOT" --env GROUP --env CLUSTER_NAME --env REVISION
+        export LOVELY_KUSTOMIZE_PARAMS="--helm-kube-version=$KUBE_VERSION --helm-api-versions=$KUBE_API_VERSIONS"
+        exec argocd-lovely-plugin

@@ -1,68 +1,51 @@
-# ArgoCD Helm chart values for argocd-lovely-plugin + charmap CMP integration.
+# Argo CD Helm chart values for the lovely approach.
 #
-# This configures the repo-server with:
-#   1. An init container that installs the charmap binary
-#   2. A CMP sidecar running argocd-lovely-plugin
-#   3. A ConfigMap defining the plugin's generate pipeline (charmap → lovely)
-#   4. Environment variables for cluster identity (GROUP, CLUSTER_NAME, etc.)
+# Installs a Config Management Plugin sidecar that replaces cluster identity
+# tokens with charmap and renders with argocd-lovely-plugin, and the
+# fleet-bootstrap Application that installs the fleet AppProject and
+# ApplicationSets through it.
 #
-# These env vars are set per-cluster at bootstrap time. All clusters share
-# the same git repo and the same Helm values structure — only the env var
-# values differ.
+# Every cluster uses these values. Per cluster, two things differ:
+#   - the cluster-identity Secret (group, cluster name), created before the
+#     install, for example by External Secrets from a secrets manager;
+#   - fleet.revision, the Git revision the cluster follows (see README,
+#     "Staged rollout").
 #
 # Chart: https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd
+# Tested with chart 10.10.2 (Argo CD v3.5.4).
+
+fleet:
+  # -- Git revision of this repository the cluster deploys: a branch, tag or
+  # commit SHA. Clusters in the same rollout ring share a value.
+  revision: main
+  # -- Directory, relative to the repository root, in which charmap replaces
+  # tokens on every render. It must contain every file an Application uses,
+  # including bases referenced by relative path.
+  renderRoot: lovely
+
+configs:
+  params:
+    # ApplicationSets never delete Applications, whatever their own
+    # syncPolicy says. Removing an application is a deliberate step.
+    applicationsetcontroller.policy: create-update
+    # The plugin needs the working tree only; do not stream Git history to
+    # it on every render.
+    reposerver.plugin.tar.exclusions: .git
 
 repoServer:
-  # -- Env vars available to both the repo-server and the CMP sidecar.
-  # Set these per-cluster at bootstrap (e.g., via Terraform, Ansible, or sealed secrets).
-  env:
-    - name: GROUP
-      valueFrom:
-        secretKeyRef:
-          name: cluster-identity
-          key: group
-    - name: CLUSTER_NAME
-      valueFrom:
-        secretKeyRef:
-          name: cluster-identity
-          key: cluster-name
-
-  # -- Volumes shared between init container, repo-server, and CMP sidecar.
   volumes:
-    - name: charmap-bin
+    # Scratch space for the sidecar's per-render repository copies. Disk
+    # backed and bounded, so it does not count against the memory limit.
+    - name: lovely-charmap-tmp
       emptyDir:
-        medium: Memory
-    - name: lovely-plugin-config
-      configMap:
-        name: argocd-lovely-plugin-config
-    - name: cmp-tmp
-      emptyDir:
-        medium: Memory
+        sizeLimit: 2Gi
 
-  # -- Init container: copies the charmap binary into a shared volume.
-  initContainers:
-    - name: install-charmap
-      image: docker.io/ashtonian/charmap:1.0.2
-      imagePullPolicy: IfNotPresent
-      command:
-        - /bin/sh
-        - -c
-        - |
-          cp /usr/local/bin/charmap /share/charmap \
-            && chmod 0777 /share/charmap
-      volumeMounts:
-        - name: charmap-bin
-          mountPath: /share
-
-  # -- CMP sidecar: runs argocd-lovely-plugin with charmap for variable substitution.
   extraContainers:
-    - name: argocd-lovely-plugin
-      image: ghcr.io/crumbhole/argocd-lovely-plugin-cmp:1.2.2
-      command:
-        - /var/run/argocd/argocd-cmp-server
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 999
+    - name: lovely-charmap
+      # Built from lovely/cmp (argocd-lovely-plugin, charmap and the plugin
+      # configuration). Pin the digest the release workflow prints.
+      image: ghcr.io/ashtonian/argo-fleet-lovely-cmp:1.0.0
+      command: [/var/run/argocd/argocd-cmp-server]
       env:
         - name: GROUP
           valueFrom:
@@ -74,60 +57,86 @@ repoServer:
             secretKeyRef:
               name: cluster-identity
               key: cluster-name
+        - name: REVISION
+          value: "{{ .Values.fleet.revision }}"
+        - name: RENDER_ROOT
+          value: "{{ .Values.fleet.renderRoot }}"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
       resources:
         requests:
-          cpu: "300m"
-          memory: "512Mi"
+          cpu: 100m
+          memory: 256Mi
+          ephemeral-storage: 1Gi
         limits:
-          cpu: "1500m"
-          memory: "1536Mi"
+          memory: 1Gi
+          ephemeral-storage: 2Gi
       volumeMounts:
-        - name: cmp-tmp
-          mountPath: /var/log
-        - name: charmap-bin
-          subPath: charmap
-          mountPath: /usr/local/bin/charmap
+        # var-files and plugins are created by the chart: the first carries
+        # the argocd-cmp-server binary, the second the plugin's socket.
         - name: var-files
           mountPath: /var/run/argocd
         - name: plugins
           mountPath: /home/argocd/cmp-server/plugins
-        - name: lovely-plugin-config
-          subPath: plugin.yaml
-          mountPath: /home/argocd/cmp-server/config/plugin.yaml
-        - name: cmp-tmp
+        - name: lovely-charmap-tmp
           mountPath: /tmp
 
-# -- ConfigMap defining the CMP plugin pipeline.
-# Charmap runs first (substitutes <::VAR::> markers), then lovely handles kustomize/helm.
 extraObjects:
-  - apiVersion: v1
-    kind: ConfigMap
+  # The project of the fleet-bootstrap Application: it may only manage the
+  # fleet's AppProject and ApplicationSets in this namespace.
+  - apiVersion: argoproj.io/v1alpha1
+    kind: AppProject
     metadata:
-      name: argocd-lovely-plugin-config
-      namespace: argocd
-    data:
-      plugin.yaml: |
-        apiVersion: argoproj.io/v1alpha1
-        kind: ConfigManagementPlugin
-        metadata:
-          name: argocd-lovely-plugin
-        spec:
-          version: v1.0
-          allowConcurrency: true
-          lockRepo: false
-          discover:
-            find:
-              glob: "**/*"
-          generate:
-            command:
-              - sh
-              - -c
-              - |
-                export LOG_FILE="/var/log/charmap-$(date +%s%N).log"
-                charmap --mode flag \
-                  --set GROUP=${GROUP} \
-                  --set CLUSTER_NAME=${CLUSTER_NAME} \
-                  --log=${LOG_FILE}
-                export ARGOCD_LOG_LEVEL="info"
-                export LOVELY_KUSTOMIZE_PARAMS="--helm-kube-version=${KUBE_VERSION} --helm-api-versions=${KUBE_API_VERSIONS}"
-                exec argocd-lovely-plugin
+      name: fleet-bootstrap
+      namespace: "{{ .Release.Namespace }}"
+    spec:
+      description: Installs the fleet AppProject and ApplicationSets.
+      sourceRepos:
+        - https://github.com/ashtonian/argo-fleet.git
+      destinations:
+        - server: https://kubernetes.default.svc
+          namespace: "{{ .Release.Namespace }}"
+      clusterResourceWhitelist: []
+      namespaceResourceWhitelist:
+        - group: argoproj.io
+          kind: AppProject
+        - group: argoproj.io
+          kind: ApplicationSet
+
+  # Renders lovely/bootstrap through the plugin, which replaces the identity
+  # tokens in the ApplicationSets before the ApplicationSet controller reads
+  # them.
+  - apiVersion: argoproj.io/v1alpha1
+    kind: Application
+    metadata:
+      name: fleet-bootstrap
+      namespace: "{{ .Release.Namespace }}"
+    spec:
+      project: fleet-bootstrap
+      source:
+        repoURL: https://github.com/ashtonian/argo-fleet.git
+        targetRevision: "{{ .Values.fleet.revision }}"
+        path: lovely/bootstrap
+        plugin:
+          name: lovely-charmap
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{ .Release.Namespace }}"
+      syncPolicy:
+        automated:
+          # Pruning an ApplicationSet deletes every Application it owns.
+          prune: false
+          selfHeal: true
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 5m

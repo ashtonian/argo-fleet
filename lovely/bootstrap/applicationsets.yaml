@@ -1,0 +1,101 @@
+# Rendered by the lovely-charmap plugin through the fleet-bootstrap
+# Application (see argocd-values.yaml), so every identity token below is
+# replaced with this cluster's values before the ApplicationSet controller
+# reads it. Applying this file directly would leave the tokens in place.
+#
+# Both ApplicationSets keep Applications and their resources when a generator
+# stops matching (a renamed directory, a mistyped group): removing an
+# application from a cluster is a deliberate step, not a side effect.
+
+# Base applications: every directory under lovely/apps/base, on every cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fleet-base
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  syncPolicy:
+    applicationsSync: create-update
+    preserveResourcesOnDeletion: true
+  generators:
+    - git:
+        repoURL: https://github.com/ashtonian/argo-fleet.git
+        revision: "<::REVISION::>"
+        directories:
+          - path: lovely/apps/base/*
+  template:
+    metadata:
+      name: "base-{{.path.basename}}"
+    spec:
+      project: fleet
+      source:
+        repoURL: https://github.com/ashtonian/argo-fleet.git
+        targetRevision: "<::REVISION::>"
+        path: "{{.path.path}}"
+        plugin:
+          name: lovely-charmap
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{.path.basename}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - PruneLast=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 5m
+---
+# Group addons: every directory under lovely/groups/<group>/addons, on the
+# clusters of that group.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fleet-group-addons
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  syncPolicy:
+    applicationsSync: create-update
+    preserveResourcesOnDeletion: true
+  generators:
+    - git:
+        repoURL: https://github.com/ashtonian/argo-fleet.git
+        revision: "<::REVISION::>"
+        directories:
+          - path: lovely/groups/<::GROUP::>/addons/*
+  template:
+    metadata:
+      name: "addon-{{.path.basename}}"
+    spec:
+      project: fleet
+      source:
+        repoURL: https://github.com/ashtonian/argo-fleet.git
+        targetRevision: "<::REVISION::>"
+        path: "{{.path.path}}"
+        plugin:
+          name: lovely-charmap
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{.path.basename}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - PruneLast=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 5m
