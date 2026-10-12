@@ -1,0 +1,55 @@
+# Values for the argocd-apps chart: the fleet-bootstrap Application and its
+# AppProject. Install after Argo CD (lovely/argocd-values.yaml):
+#
+#   helm install fleet-bootstrap argocd-apps --repo https://argoproj.github.io/argo-helm \
+#     --version 2.0.6 --namespace argocd --values lovely/bootstrap-values.yaml \
+#     --set applications.fleet-bootstrap.source.targetRevision=<revision>
+#
+# targetRevision is the one per-cluster setting for rollout: a branch, tag or
+# commit. fleet-bootstrap renders lovely/bootstrap through the plugin, which
+# pins the ApplicationSets, and every Application they generate, to the
+# exact commit fleet-bootstrap resolved.
+#
+# Chart: https://github.com/argoproj/argo-helm/tree/main/charts/argocd-apps
+
+projects:
+  # fleet-bootstrap may only manage the fleet's AppProject and
+  # ApplicationSets in the argocd namespace.
+  fleet-bootstrap:
+    namespace: argocd
+    description: Installs the fleet AppProject and ApplicationSets.
+    sourceRepos:
+      - https://github.com/ashtonian/argo-fleet.git
+    destinations:
+      - server: https://kubernetes.default.svc
+        namespace: argocd
+    namespaceResourceWhitelist:
+      - group: argoproj.io
+        kind: AppProject
+      - group: argoproj.io
+        kind: ApplicationSet
+
+applications:
+  fleet-bootstrap:
+    namespace: argocd
+    project: fleet-bootstrap
+    source:
+      repoURL: https://github.com/ashtonian/argo-fleet.git
+      targetRevision: main
+      path: lovely/bootstrap
+      plugin:
+        name: lovely-charmap
+    destination:
+      server: https://kubernetes.default.svc
+      namespace: argocd
+    syncPolicy:
+      automated:
+        # Pruning an ApplicationSet deletes every Application it owns.
+        prune: false
+        selfHeal: true
+      retry:
+        limit: 5
+        backoff:
+          duration: 10s
+          factor: 2
+          maxDuration: 5m

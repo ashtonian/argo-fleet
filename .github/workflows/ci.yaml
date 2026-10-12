@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  KUSTOMIZE_VERSION: v5.8.3
+  KUBECONFORM_VERSION: v0.8.0
+  ACTIONLINT_VERSION: v1.7.12
+  ARGO_CD_CHART_VERSION: 10.10.2
+  ARGOCD_APPS_CHART_VERSION: 2.0.6
+  # CRD schemas for ApplicationSet, AppProject and Application.
+  CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.x"
+          cache: false
+      - name: Install tools
+        run: |
+          go install "sigs.k8s.io/kustomize/kustomize/v5@${KUSTOMIZE_VERSION#kustomize/}"
+          go install "github.com/yannh/kubeconform/cmd/kubeconform@$KUBECONFORM_VERSION"
+          go install "github.com/rhysd/actionlint/cmd/actionlint@$ACTIONLINT_VERSION"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.0
+      - name: actionlint
+        run: actionlint
+      - name: shellcheck
+        run: |
+          shellcheck scripts/*.sh
+          yq '.spec.generate.args[0]' lovely/cmp/plugin.yaml > "$RUNNER_TEMP/generate.sh"
+          shellcheck --shell=bash "$RUNNER_TEMP/generate.sh"
+      - name: kustomize build every application
+        run: |
+          find . -name kustomization.yaml -not -path './.git/*' -print0 |
+            while IFS= read -r -d '' k; do
+              dir=$(dirname "$k")
+              kustomize build "$dir" > /dev/null || { echo "::error file=$k::kustomize build $dir failed"; exit 1; }
+              echo "ok $dir"
+            done
+      - name: Validate Argo CD resources against their CRD schemas
+        run: |
+          kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS" \
+            overlay/applicationset.yaml matrix/applicationsets.yaml
+          kustomize build lovely/bootstrap |
+            kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS"
+          helm template fleet-bootstrap argocd-apps --repo https://argoproj.github.io/argo-helm \
+            --version "$ARGOCD_APPS_CHART_VERSION" --namespace argocd --values lovely/bootstrap-values.yaml |
+            kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS"
+
+  # Renders every lovely Application inside the plugin image, the way the
+  # sidecar does, for each example identity.
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.x"
+          cache: false
+      - run: go install "github.com/yannh/kubeconform/cmd/kubeconform@$KUBECONFORM_VERSION"
+      - run: docker build -t fleet-cmp:ci lovely/cmp
+      - run: scripts/render-test.sh fleet-cmp:ci "$RUNNER_TEMP/rendered"
+      - name: Validate rendered manifests
+        run: kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS" "$RUNNER_TEMP/rendered"
+
+  # Installs Argo CD with lovely/argocd-values.yaml into a kind cluster whose
+  # argocd namespace enforces the restricted Pod Security Standard, then
+  # checks the fleet comes up from this commit.
+  e2e:
+    needs: [static, render]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build -t fleet-cmp:ci lovely/cmp
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          node_image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+          cluster_name: fleet
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.0
+      - run: kind load docker-image fleet-cmp:ci --name fleet
+      - name: End-to-end
+        env:
+          REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: scripts/e2e.sh fleet-cmp:ci "$REVISION"
