@@ -34,7 +34,7 @@ repoServer:
     - name: lovely-charmap
       # Built from lovely/cmp (argocd-lovely-plugin, charmap and the plugin
       # configuration) by the CMP image workflow, which prints the digest.
-      image: ghcr.io/ashtonian/argo-fleet-lovely-cmp:1.0.0@sha256:2c300247d67e0d8bc83dc30d876ed1a7279a96a73e0d27a8b6598af7da666c16
+      image: ghcr.io/ashtonian/argo-fleet-lovely-cmp:2.0.0@sha256:611c7c1673c933ef7ad499eb8c9a75b51ca765be5b04acb2e11c048404dc35cd
       command: [/var/run/argocd/argocd-cmp-server]
       env:
         - name: GROUP
