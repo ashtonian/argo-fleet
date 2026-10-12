@@ -12,7 +12,7 @@ spec:
   generators:
     - matrix:
         generators:
-          # This cluster's own registration Secret (native/identity).
+          # This cluster's own registration Secret (identity).
           - clusters:
               selector:
                 matchLabels:

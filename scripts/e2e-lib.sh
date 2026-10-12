@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# Shared by the end-to-end tests: sourced, not run. Each test installs Argo CD,
-# so every function here assumes require_kind_context has passed.
+# Shared by the end-to-end tests: sourced, not run. Each test installs Argo
+# CD, so every function here assumes require_kind_context has passed.
 
+repo=${repo:-$(git rev-parse --show-toplevel)}
 argo_cd_chart=${ARGO_CD_CHART_VERSION:-10.10.2}
 argocd_apps_chart=${ARGOCD_APPS_CHART_VERSION:-2.0.6}
+external_secrets_chart=${EXTERNAL_SECRETS_CHART_VERSION:-2.12.0}
 argo_helm=https://argoproj.github.io/argo-helm
+
+# fail MESSAGE: stops the test.
+fail() {
+  echo "$1" >&2
+  exit 1
+}
 
 # require_kind_context: refuses any kubectl context not named kind-*.
 require_kind_context() {
@@ -40,6 +48,19 @@ prepare_namespace() {
 install_argocd() {
   helm install argocd argo-cd --repo "$argo_helm" --version "$argo_cd_chart" \
     --namespace argocd --values "$1" --wait --timeout 10m
+}
+
+# install_external_secrets: installs External Secrets and waits for it.
+install_external_secrets() {
+  helm install external-secrets external-secrets --repo https://charts.external-secrets.io \
+    --version "$external_secrets_chart" --namespace external-secrets --create-namespace --wait --timeout 10m
+}
+
+# register_cluster REVISION: writes the example registration Secret
+# (identity/cluster-secret.example.yaml), as a provisioner would, at REVISION.
+register_cluster() {
+  REVISION=$1 yq '.metadata.annotations."fleet.ashtonian.dev/revision" = strenv(REVISION)' \
+    "$repo/identity/cluster-secret.example.yaml" | kubectl apply -f -
 }
 
 # install_bootstrap VALUES [HELM_ARGS...]: installs the argocd-apps chart.
@@ -84,4 +105,42 @@ eventually() {
     sleep 5
   done
   echo "ok   $what"
+}
+
+# repo_server_pods: the repo-server pods' UIDs, to tell whether they restarted.
+repo_server_pods() {
+  kubectl -n argocd get pods -l app.kubernetes.io/component=repo-server -o jsonpath='{.items[*].metadata.uid}'
+}
+
+# app_targets NAME REVISION: the Application targets REVISION.
+app_targets() {
+  [[ $(kubectl -n argocd get application "$1" -o jsonpath='{.spec.source.targetRevision}') == "$2" ]]
+}
+
+# app_error NAME [TEXT]: the Application has a ComparisonError, containing
+# TEXT when given.
+app_error() {
+  kubectl -n argocd get application "$1" \
+    -o jsonpath='{.status.conditions[?(@.type=="ComparisonError")].message}' | grep -qF -- "${2:-}"
+}
+
+# appset_error NAME TEXT: the ApplicationSet reports an error containing TEXT.
+appset_error() {
+  kubectl -n argocd get applicationset "$1" \
+    -o jsonpath='{.status.conditions[?(@.type=="ErrorOccurred")].message}' | grep -qF -- "$2"
+}
+
+# revision_labelled REVISION: every Application carries the
+# fleet.ashtonian.dev/revision label with REVISION.
+revision_labelled() {
+  local labels
+  labels=$(kubectl -n argocd get applications -o jsonpath='{range .items[*]}{.metadata.labels.fleet\.ashtonian\.dev/revision}{"\n"}{end}' | sort -u)
+  [[ $labels == "$1" ]]
+}
+
+# metrics_count_revision REVISION: Argo CD's argocd_app_labels metric shows
+# an Application at REVISION.
+metrics_count_revision() {
+  kubectl get --raw /api/v1/namespaces/argocd/services/argocd-application-controller-metrics:http-metrics/proxy/metrics |
+    grep -q "^argocd_app_labels{.*label_fleet_ashtonian_dev_revision=\"$1\""
 }

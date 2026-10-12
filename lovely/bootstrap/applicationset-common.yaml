@@ -1,0 +1,75 @@
+# The spec every fleet ApplicationSet shares, merged into each by
+# kustomization.yaml. Every value comes from the cluster generator, which reads
+# this cluster's registration Secret (identity/cluster-secret.example.yaml):
+# labels select, annotations carry values.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: applicationset-common
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  # A generator that stops matching keeps its Applications and their
+  # resources: removing an application is a deliberate step.
+  syncPolicy:
+    applicationsSync: create-update
+    preserveResourcesOnDeletion: true
+  template:
+    metadata:
+      # For fleet metrics: Argo CD exports these with argocd_app_labels
+      # (lovely/argocd-values.yaml), so a rollout gate can count clusters at
+      # a revision.
+      labels:
+        fleet.ashtonian.dev/group: '{{ index .metadata.labels "fleet.ashtonian.dev/group" }}'
+        fleet.ashtonian.dev/revision: '{{ index .metadata.annotations "fleet.ashtonian.dev/revision" }}'
+    spec:
+      project: fleet
+      source:
+        repoURL: https://github.com/ashtonian/argo-fleet.git
+        targetRevision: '{{ index .metadata.annotations "fleet.ashtonian.dev/revision" }}'
+        plugin:
+          name: lovely-charmap
+      destination:
+        server: "{{ .server }}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - PruneLast=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 5m
+  # Checks the cluster's identity, then passes it to the plugin in the
+  # Application's spec: FLEET_GROUP, FLEET_CLUSTER_NAME and FLEET_<KEY> for
+  # every values.fleet.ashtonian.dev/<KEY> annotation, each filling token KEY.
+  # Argo CD's manifest cache keys on the spec, so a changed value re-renders
+  # with no restart. A failed check fails generation, which changes nothing:
+  # missingkey=error does not cover a label or annotation read with index.
+  # Tokens are inserted as they are, so a value may not contain a newline.
+  templatePatch: |
+    {{- $group := index .metadata.labels "fleet.ashtonian.dev/group" }}
+    {{- $revision := index .metadata.annotations "fleet.ashtonian.dev/revision" }}
+    {{- if not $group }}{{ fail "cluster Secret has no fleet.ashtonian.dev/group label" }}{{ end }}
+    {{- if not $revision }}{{ fail "cluster Secret has no fleet.ashtonian.dev/revision annotation" }}{{ end }}
+    {{- $labelValue := "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$" }}
+    {{- if not (regexMatch $labelValue $revision) }}{{ fail (printf "revision %q is not a valid label value: use a commit, a tag, or a branch without '/'" $revision) }}{{ end }}
+    {{- if not (regexMatch $labelValue .name) }}{{ fail (printf "cluster name %q is not a valid label value" .name) }}{{ end }}
+    {{- $env := list (dict "name" "FLEET_GROUP" "value" $group) (dict "name" "FLEET_CLUSTER_NAME" "value" .name) }}
+    {{- range $key, $value := .metadata.annotations }}
+    {{- if hasPrefix "values.fleet.ashtonian.dev/" $key }}
+    {{- $name := trimPrefix "values.fleet.ashtonian.dev/" $key }}
+    {{- if has $name (list "GROUP" "CLUSTER_NAME" "REVISION") }}{{ fail (printf "%s is reserved: GROUP and CLUSTER_NAME come from the group label and the cluster's name, REVISION is the commit Argo CD resolved" $key) }}{{ end }}
+    {{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_]*$" $name) }}{{ fail (printf "%s: a token name is letters, digits and '_', and does not start with a digit" $key) }}{{ end }}
+    {{- if contains "\n" $value }}{{ fail (printf "%s contains a newline, which a token cannot carry" $key) }}{{ end }}
+    {{- $env = append $env (dict "name" (printf "FLEET_%s" $name) "value" $value) }}
+    {{- end }}
+    {{- end }}
+    spec:
+      source:
+        plugin:
+          env: {{ toJson $env }}

@@ -20,6 +20,7 @@ env:
   ACTIONLINT_VERSION: v1.7.12
   ARGO_CD_CHART_VERSION: 10.10.2
   ARGOCD_APPS_CHART_VERSION: 2.0.6
+  EXTERNAL_SECRETS_CHART_VERSION: 2.12.0
   # CRD schemas for ApplicationSet, AppProject, Application and ExternalSecret.
   CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
 
@@ -66,9 +67,9 @@ jobs:
           helm template fleet-bootstrap argocd-apps --repo https://argoproj.github.io/argo-helm \
             --version "$ARGOCD_APPS_CHART_VERSION" --namespace argocd --values native/bootstrap-values.yaml |
             kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS"
-          kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS" native/identity
+          kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS" identity
 
-  # Renders every lovely Application inside the plugin image, the way the
+  # Renders every lovely application inside the plugin image, the way the
   # sidecar does, for each example identity.
   render:
     runs-on: ubuntu-latest
@@ -87,9 +88,11 @@ jobs:
       - name: Validate rendered manifests
         run: kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS" "$RUNNER_TEMP/rendered"
 
-  # Installs Argo CD with lovely/argocd-values.yaml into a kind cluster whose
-  # argocd namespace enforces the restricted Pod Security Standard, then
-  # checks the fleet comes up from this commit.
+  # Installs Argo CD with lovely/argocd-values.yaml, using the plugin image
+  # built from this commit, into a kind cluster whose argocd namespace
+  # enforces the restricted Pod Security Standard. Checks the fleet comes up
+  # from this commit with every token replaced, that a changed value applies
+  # with no restart, and that a missing value or identity changes nothing.
   e2e:
     needs: [static, render]
     runs-on: ubuntu-latest
@@ -113,12 +116,14 @@ jobs:
           REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: scripts/e2e.sh fleet-cmp:ci "$REVISION"
 
-  # Installs Argo CD with native/argocd-values.yaml into a kind cluster whose
-  # argocd namespace enforces the restricted Pod Security Standard, registers
-  # the cluster with the example identity, and checks the native fleet comes
-  # up from this commit. It also checks that a changed value reaches the
-  # running pods with no restart, that a missing value fails only the
-  # application that needs it, and that an incomplete identity changes nothing.
+  # Installs External Secrets and Argo CD with native/argocd-values.yaml into
+  # a kind cluster whose argocd namespace enforces the restricted Pod Security
+  # Standard. A seed Secret plus External Secrets' fake provider deliver the
+  # identity and the ring's revision. Checks the native fleet comes up from
+  # this commit, that a changed value reaches the running pods with no
+  # restart, that a ring promotion and a cluster's own revision apply, and
+  # that a bad revision, a missing value or an incomplete identity changes
+  # nothing it should not.
   e2e-native:
     needs: static
     runs-on: ubuntu-latest

@@ -5,8 +5,8 @@ metadata:
   labels:
     app: logging
     tier: base
-    group: "<::GROUP::>"
-    cluster: "<::CLUSTER_NAME::>"
+    fleet.ashtonian.dev/group: "<::GROUP::>"
+    fleet.ashtonian.dev/cluster: "<::CLUSTER_NAME::>"
 spec:
   replicas: 1
   selector:
@@ -17,13 +17,13 @@ spec:
       labels:
         app: logging
         tier: base
-        group: "<::GROUP::>"
-        cluster: "<::CLUSTER_NAME::>"
+        fleet.ashtonian.dev/group: "<::GROUP::>"
+        fleet.ashtonian.dev/cluster: "<::CLUSTER_NAME::>"
     spec:
       containers:
         - name: logging
-          image: busybox:latest
-          command: ['sh', '-c', 'echo "log collector running on <::CLUSTER_NAME::> in group <::GROUP::>" && sleep 3600']
+          image: busybox:1.37
+          command: ['sh', '-c', 'echo "log collector on <::CLUSTER_NAME::>" && sleep 3600']
           resources:
             limits:
               memory: "128Mi"
@@ -31,3 +31,10 @@ spec:
             requests:
               memory: "64Mi"
               cpu: "50m"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/logging
+      volumes:
+        - name: config
+          configMap:
+            name: logging-config

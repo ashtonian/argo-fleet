@@ -5,8 +5,8 @@ metadata:
   labels:
     app: ingress
     tier: base
-    group: "<::GROUP::>"
-    cluster: "<::CLUSTER_NAME::>"
+    fleet.ashtonian.dev/group: "<::GROUP::>"
+    fleet.ashtonian.dev/cluster: "<::CLUSTER_NAME::>"
 spec:
   replicas: 1
   selector:
@@ -17,13 +17,16 @@ spec:
       labels:
         app: ingress
         tier: base
-        group: "<::GROUP::>"
-        cluster: "<::CLUSTER_NAME::>"
+        fleet.ashtonian.dev/group: "<::GROUP::>"
+        fleet.ashtonian.dev/cluster: "<::CLUSTER_NAME::>"
     spec:
       containers:
         - name: ingress
-          image: busybox:latest
-          command: ['sh', '-c', 'echo "ingress controller running on <::CLUSTER_NAME::> in group <::GROUP::>" && sleep 3600']
+          image: busybox:1.37
+          command: ['sh', '-c', 'echo "ingress controller on <::CLUSTER_NAME::>" && sleep 3600']
+          env:
+            - name: PUBLIC_URL
+              value: "https://ingress.<::REGION::>.example.com/healthz"
           resources:
             limits:
               memory: "128Mi"

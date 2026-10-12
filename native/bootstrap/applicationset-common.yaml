@@ -1,6 +1,6 @@
 # The spec every fleet ApplicationSet shares, merged into each by
 # kustomization.yaml. Every value comes from the cluster generator, which reads
-# this cluster's registration Secret (native/identity): labels select,
+# this cluster's registration Secret (identity): labels select,
 # annotations carry values.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
@@ -15,6 +15,13 @@ spec:
     applicationsSync: create-update
     preserveResourcesOnDeletion: true
   template:
+    metadata:
+      # For fleet metrics: Argo CD exports these with argocd_app_labels
+      # (native/argocd-values.yaml), so a rollout gate can count clusters at
+      # a revision.
+      labels:
+        fleet.ashtonian.dev/group: '{{ index .metadata.labels "fleet.ashtonian.dev/group" }}'
+        fleet.ashtonian.dev/revision: '{{ index .metadata.annotations "fleet.ashtonian.dev/revision" }}'
     spec:
       project: fleet
       source:
@@ -58,7 +65,9 @@ spec:
     {{- $revision := index .metadata.annotations "fleet.ashtonian.dev/revision" }}
     {{- if not $group }}{{ fail "cluster Secret has no fleet.ashtonian.dev/group label" }}{{ end }}
     {{- if not $revision }}{{ fail "cluster Secret has no fleet.ashtonian.dev/revision annotation" }}{{ end }}
-    {{- if not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$" .name) }}{{ fail (printf "cluster name %q is not a valid label value" .name) }}{{ end }}
+    {{- $labelValue := "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$" }}
+    {{- if not (regexMatch $labelValue $revision) }}{{ fail (printf "revision %q is not a valid label value: use a commit, a tag, or a branch without '/'" $revision) }}{{ end }}
+    {{- if not (regexMatch $labelValue .name) }}{{ fail (printf "cluster name %q is not a valid label value" .name) }}{{ end }}
     {{- $values := dict "GROUP" $group "CLUSTER_NAME" .name }}
     {{- range $key, $value := .metadata.annotations }}
     {{- if hasPrefix "values.fleet.ashtonian.dev/" $key }}

@@ -1,6 +1,7 @@
 # Values for the argocd-apps chart: the fleet-bootstrap ApplicationSet and its
 # AppProject. The same on every cluster; install after Argo CD
-# (native/argocd-values.yaml) and the cluster's registration Secret:
+# (native/argocd-values.yaml). The cluster's registration Secret may come
+# before or after: the ApplicationSet acts as soon as it appears.
 #
 #   helm install fleet-bootstrap argocd-apps --repo https://argoproj.github.io/argo-helm \
 #     --version 2.0.6 --namespace argocd --values native/bootstrap-values.yaml
@@ -46,6 +47,8 @@ applicationsets:
     template:
       metadata:
         name: fleet-bootstrap
+        labels:
+          fleet.ashtonian.dev/revision: '{{ index .metadata.annotations "fleet.ashtonian.dev/revision" }}'
       spec:
         project: fleet-bootstrap
         source:
@@ -67,5 +70,7 @@ applicationsets:
               factor: 2
               maxDuration: 5m
     templatePatch: |
-      {{- if not (index .metadata.annotations "fleet.ashtonian.dev/revision") }}{{ fail "cluster Secret has no fleet.ashtonian.dev/revision annotation" }}{{ end -}}
+      {{- $revision := index .metadata.annotations "fleet.ashtonian.dev/revision" }}
+      {{- if not $revision }}{{ fail "cluster Secret has no fleet.ashtonian.dev/revision annotation" }}{{ end }}
+      {{- if not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$" $revision) }}{{ fail (printf "revision %q is not a valid label value: use a commit, a tag, or a branch without '/'" $revision) }}{{ end }}
       {}
