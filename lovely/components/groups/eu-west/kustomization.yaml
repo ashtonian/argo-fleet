@@ -1,0 +1,8 @@
+# eu-west marks every resource as subject to EU data residency. Every group
+# needs a Component, and a Component must set at least one thing: a group
+# with no real override can carry a marker like this one. A misspelt group
+# then fails to render instead of silently getting no overrides.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+commonAnnotations:
+  fleet.ashtonian.dev/data-residency: eu

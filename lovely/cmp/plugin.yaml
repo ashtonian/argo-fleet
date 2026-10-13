@@ -12,21 +12,25 @@ spec:
     args:
       - |
         set -euo pipefail
-        # Applications cannot change the pipeline: drop any plugin environment
-        # an Application sets (ARGOCD_ENV_*), which argocd-lovely-plugin would
-        # otherwise read, including commands for it to run.
-        while IFS= read -r name; do unset "$name"; done < <(compgen -e | grep '^ARGOCD_ENV_' || true)
-        # Cluster identity comes from the sidecar's environment, which
-        # argocd-values.yaml fills from the cluster-identity Secret. An unset
-        # or empty value stops the render instead of producing empty labels.
-        # REVISION is the commit Argo CD resolved for this Application, so
-        # the ApplicationSets that fleet-bootstrap renders pin every
-        # Application to that same commit.
-        : "${GROUP:?}" "${CLUSTER_NAME:?}" "${RENDER_ROOT:?}" "${ARGOCD_APP_REVISION:?}"
+        # The cluster's identity and values arrive in this Application's spec
+        # (plugin.env, written by the fleet ApplicationSets from the cluster's
+        # registration Secret), which Argo CD passes as ARGOCD_ENV_FLEET_<KEY>:
+        # FLEET_REGION fills the REGION token. The spec is part of Argo CD's
+        # manifest cache key, so a changed value re-renders with no restart.
+        # GROUP and CLUSTER_NAME are required by this repository's manifests,
+        # so an unset or empty value stops the render instead of producing
+        # empty labels.
+        : "${ARGOCD_ENV_FLEET_GROUP:?}" "${ARGOCD_ENV_FLEET_CLUSTER_NAME:?}" "${RENDER_ROOT:?}" "${RENDER_INCLUDE:?}" "${ARGOCD_APP_REVISION:?}"
         # Substitute across RENDER_ROOT rather than only this Application's
-        # directory, so tokens in bases it references by relative path are
-        # replaced too. Each render works on a private copy of the repository.
+        # directory, so tokens in bases and Components it references by
+        # relative path are replaced too, in every file RENDER_INCLUDE
+        # selects. Each render works on a private copy of the repository.
+        # REVISION is the commit Argo CD resolved.
         repo_root=${PWD%"/$ARGOCD_APP_SOURCE_PATH"}
-        charmap render --dir "$repo_root/$RENDER_ROOT" --env GROUP --env CLUSTER_NAME --set "REVISION=$ARGOCD_APP_REVISION"
+        charmap render --dir "$repo_root/$RENDER_ROOT" --include "$RENDER_INCLUDE" \
+          --env-prefix ARGOCD_ENV_FLEET_ --set "REVISION=$ARGOCD_APP_REVISION"
+        # argocd-lovely-plugin reads its own settings, including commands to
+        # run, from ARGOCD_ENV_*. None may come from an Application.
+        while IFS= read -r name; do unset "$name"; done < <(compgen -e | grep '^ARGOCD_ENV_' || true)
         export LOVELY_KUSTOMIZE_PARAMS="--helm-kube-version=$KUBE_VERSION --helm-api-versions=$KUBE_API_VERSIONS"
         exec argocd-lovely-plugin

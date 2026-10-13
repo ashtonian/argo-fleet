@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+# A value used outside the environment is wired to its field: the second
+# dot-separated part of the hostname becomes the cluster's REGION. A cluster
+# without a REGION value fails to render this application, and nothing changes.
+replacements:
+  - source:
+      kind: ConfigMap
+      name: fleet-identity
+      fieldPath: data.REGION
+    targets:
+      - select:
+          kind: Service
+          name: ingress
+        fieldPaths:
+          - metadata.annotations.[external-dns.alpha.kubernetes.io/hostname]
+        options:
+          delimiter: "."
+          index: 1

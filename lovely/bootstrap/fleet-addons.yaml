@@ -1,0 +1,40 @@
+# Addons: the comma-separated list in the cluster Secret's
+# fleet.ashtonian.dev/addons annotation, one Application each, from
+# lovely/apps/addons/<addon>. Adding an addon to a cluster changes nothing in
+# Git. An invalid name fails generation, which changes nothing. The rest of
+# the spec is shared, in applicationset-common.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fleet-addons
+  namespace: argocd
+spec:
+  generators:
+    - matrix:
+        generators:
+          # This cluster's own registration Secret (identity).
+          - clusters:
+              selector:
+                matchLabels:
+                  fleet.ashtonian.dev/managed: "true"
+          - list:
+              elementsYaml: |
+                {{- $addons := list }}
+                {{- range splitList "," (index .metadata.annotations "fleet.ashtonian.dev/addons") }}
+                {{- $addon := trim . }}
+                {{- if $addon }}
+                {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $addon) }}{{ fail (printf "addon %q in fleet.ashtonian.dev/addons is not a valid name: lowercase letters, digits and '-', at most 63" $addon) }}{{ end }}
+                {{- $addons = append $addons $addon }}
+                {{- end }}
+                {{- end }}
+                {{- range uniq $addons }}
+                - addon: {{ . }}
+                {{- end }}
+  template:
+    metadata:
+      name: "addon-{{ .addon }}"
+    spec:
+      source:
+        path: "lovely/apps/addons/{{ .addon }}"
+      destination:
+        namespace: "{{ .addon }}"

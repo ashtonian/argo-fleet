@@ -1,0 +1,12 @@
+# us-east runs two replicas of every application. A Component is applied by
+# each Application (kustomize.components), so a group override can change
+# structure, not just strings.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: Deployment
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2

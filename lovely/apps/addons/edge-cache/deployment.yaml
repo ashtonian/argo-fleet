@@ -5,6 +5,8 @@ metadata:
   labels:
     app: edge-cache
     tier: addon
+    fleet.ashtonian.dev/group: "<::GROUP::>"
+    fleet.ashtonian.dev/cluster: "<::CLUSTER_NAME::>"
 spec:
   replicas: 1
   selector:
@@ -15,11 +17,13 @@ spec:
       labels:
         app: edge-cache
         tier: addon
+        fleet.ashtonian.dev/group: "<::GROUP::>"
+        fleet.ashtonian.dev/cluster: "<::CLUSTER_NAME::>"
     spec:
       containers:
         - name: edge-cache
-          image: busybox:latest
-          command: ['sh', '-c', 'echo "edge cache running" && sleep 3600']
+          image: busybox:1.37
+          command: ['sh', '-c', 'echo "edge cache on <::CLUSTER_NAME::>" && sleep 3600']
           resources:
             limits:
               memory: "128Mi"

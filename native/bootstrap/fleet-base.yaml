@@ -1,0 +1,29 @@
+# Base applications: every directory under native/apps/base, on every managed
+# cluster. The rest of the spec is shared, in applicationset-common.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fleet-base
+  namespace: argocd
+spec:
+  generators:
+    - matrix:
+        generators:
+          # This cluster's own registration Secret (identity).
+          - clusters:
+              selector:
+                matchLabels:
+                  fleet.ashtonian.dev/managed: "true"
+          - git:
+              repoURL: https://github.com/ashtonian/argo-fleet.git
+              revision: '{{ index .metadata.annotations "fleet.ashtonian.dev/revision" }}'
+              directories:
+                - path: native/apps/base/*
+  template:
+    metadata:
+      name: "base-{{ .path.basename }}"
+    spec:
+      source:
+        path: "{{ .path.path }}"
+      destination:
+        namespace: "{{ .path.basename }}"

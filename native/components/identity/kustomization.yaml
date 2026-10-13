@@ -1,0 +1,8 @@
+# Every fleet Application includes this Component (kustomize.components). It
+# generates the fleet-identity ConfigMap, which the ApplicationSets fill with
+# the cluster's GROUP, CLUSTER_NAME and values. The name gets a hash of the
+# content, so a changed value rolls the workloads that reference it.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+configMapGenerator:
+  - name: fleet-identity

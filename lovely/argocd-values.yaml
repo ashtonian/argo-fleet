@@ -1,14 +1,15 @@
 # Argo CD Helm chart values for the lovely approach.
 #
-# Installs a Config Management Plugin sidecar that replaces cluster identity
-# tokens with charmap and renders with argocd-lovely-plugin. The
-# fleet-bootstrap Application that uses it is a second Helm release, made
-# from lovely/bootstrap-values.yaml with the argocd-apps chart, because a
-# release cannot create Argo CD resources before it has installed their CRDs.
+# Installs a Config Management Plugin sidecar that replaces tokens with
+# charmap and renders with argocd-lovely-plugin. The token values come from
+# each Application's spec, which the fleet ApplicationSets fill from the
+# cluster's registration Secret (identity/cluster-secret.example.yaml), so
+# the sidecar mounts no Secret and needs no restart when a value changes.
 #
-# Every cluster uses these values unchanged. What differs per cluster is the
-# cluster-identity Secret (group, cluster name), created before the install,
-# for example by External Secrets from a secrets manager.
+# The fleet-bootstrap ApplicationSet is a second Helm release, made from
+# lovely/bootstrap-values.yaml with the argocd-apps chart, because a release
+# cannot create Argo CD resources before it has installed their CRDs. Every
+# cluster uses these values unchanged.
 #
 # Chart: https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd
 # Tested with chart 10.10.2 (Argo CD v3.5.4).
@@ -37,21 +38,16 @@ repoServer:
       image: ghcr.io/ashtonian/argo-fleet-lovely-cmp:2.0.0@sha256:611c7c1673c933ef7ad499eb8c9a75b51ca765be5b04acb2e11c048404dc35cd
       command: [/var/run/argocd/argocd-cmp-server]
       env:
-        - name: GROUP
-          valueFrom:
-            secretKeyRef:
-              name: cluster-identity
-              key: group
-        - name: CLUSTER_NAME
-          valueFrom:
-            secretKeyRef:
-              name: cluster-identity
-              key: cluster-name
         # Directory, relative to the repository root, in which charmap
         # replaces tokens on every render. It must contain every file an
         # Application uses, including bases referenced by relative path.
         - name: RENDER_ROOT
           value: lovely
+        # Files under RENDER_ROOT whose path matches this regular expression
+        # have their tokens replaced; others are left as they are. Binary
+        # files, such as packaged Helm charts, must not match.
+        - name: RENDER_INCLUDE
+          value: '\.(ya?ml|json|conf|cfg|ini|toml|properties|txt|tpl)$'
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
@@ -78,3 +74,16 @@ repoServer:
           mountPath: /home/argocd/cmp-server/plugins
         - name: lovely-charmap-tmp
           mountPath: /tmp
+
+controller:
+  metrics:
+    enabled: true
+    # Adds the Applications' fleet labels to argocd_app_labels, as
+    # label_fleet_ashtonian_dev_revision and label_fleet_ashtonian_dev_group:
+    # with argocd_app_info's sync and health status, the count of clusters
+    # running each revision healthily.
+    applicationLabels:
+      enabled: true
+      labels:
+        - fleet.ashtonian.dev/revision
+        - fleet.ashtonian.dev/group

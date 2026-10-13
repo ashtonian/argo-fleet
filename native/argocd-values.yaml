@@ -1,0 +1,26 @@
+# Argo CD Helm chart values for the native approach. No plugin: Argo CD's
+# built-in Kustomize renders every Application. Every cluster uses these
+# values unchanged; what differs per cluster is its registration Secret
+# (identity/cluster-secret.example.yaml).
+#
+# Chart: https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd
+# Tested with chart 10.10.2 (Argo CD v3.5.4).
+
+configs:
+  params:
+    # ApplicationSets never delete Applications, whatever their own
+    # syncPolicy says. Removing an application is a deliberate step.
+    applicationsetcontroller.policy: create-update
+
+controller:
+  metrics:
+    enabled: true
+    # Adds the Applications' fleet labels to argocd_app_labels, as
+    # label_fleet_ashtonian_dev_revision and label_fleet_ashtonian_dev_group:
+    # with argocd_app_info's sync and health status, the count of clusters
+    # running each revision healthily.
+    applicationLabels:
+      enabled: true
+      labels:
+        - fleet.ashtonian.dev/revision
+        - fleet.ashtonian.dev/group

@@ -1,0 +1,15 @@
+# Installed by the fleet-bootstrap Application at the revision in the cluster
+# Secret's fleet.ashtonian.dev/revision annotation (native/bootstrap-values.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - project.yaml
+  - fleet-base.yaml
+  - fleet-addons.yaml
+# Every fleet ApplicationSet shares one spec: how the cluster's identity
+# becomes each Application's Kustomize settings, and the safeguards.
+patches:
+  - path: applicationset-common.yaml
+    target:
+      group: argoproj.io
+      kind: ApplicationSet
