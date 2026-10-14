@@ -117,17 +117,25 @@ app_targets() {
   [[ $(kubectl -n argocd get application "$1" -o jsonpath='{.spec.source.targetRevision}') == "$2" ]]
 }
 
+# The checks below capture kubectl's output before matching it. Piped into
+# grep -q under pipefail, a check fails whenever grep stops reading at its
+# first match while kubectl is still writing, which depends on output size.
+
 # app_error NAME [TEXT]: the Application has a ComparisonError, containing
 # TEXT when given.
 app_error() {
-  kubectl -n argocd get application "$1" \
-    -o jsonpath='{.status.conditions[?(@.type=="ComparisonError")].message}' | grep -qF -- "${2:-}"
+  local message
+  message=$(kubectl -n argocd get application "$1" \
+    -o jsonpath='{.status.conditions[?(@.type=="ComparisonError")].message}') || return 1
+  [[ -n $message && $message == *"${2:-}"* ]]
 }
 
 # appset_error NAME TEXT: the ApplicationSet reports an error containing TEXT.
 appset_error() {
-  kubectl -n argocd get applicationset "$1" \
-    -o jsonpath='{.status.conditions[?(@.type=="ErrorOccurred")].message}' | grep -qF -- "$2"
+  local message
+  message=$(kubectl -n argocd get applicationset "$1" \
+    -o jsonpath='{.status.conditions[?(@.type=="ErrorOccurred")].message}') || return 1
+  [[ $message == *"$2"* ]]
 }
 
 # revision_labelled REVISION: every Application carries the
@@ -141,6 +149,8 @@ revision_labelled() {
 # metrics_count_revision REVISION: Argo CD's argocd_app_labels metric shows
 # an Application at REVISION.
 metrics_count_revision() {
-  kubectl get --raw /api/v1/namespaces/argocd/services/argocd-application-controller-metrics:http-metrics/proxy/metrics |
-    grep -q "^argocd_app_labels{.*label_fleet_ashtonian_dev_revision=\"$1\""
+  local metrics
+  metrics=$(kubectl get --raw /api/v1/namespaces/argocd/services/argocd-application-controller-metrics:http-metrics/proxy/metrics) ||
+    return 1
+  grep -q "^argocd_app_labels{.*label_fleet_ashtonian_dev_revision=\"$1\"" <<<"$metrics"
 }
