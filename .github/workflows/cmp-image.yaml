@@ -9,13 +9,16 @@ on:
   push:
     tags: ["cmp-v*"]
 
-permissions: {}
+permissions:
+  id-token: write
 
 concurrency:
   group: cmp-image
   cancel-in-progress: false
 
 env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+  CI_ARTIFACT_ENDPOINT: ${{ vars.CI_ARTIFACT_ENDPOINT }}
   IMAGE: ghcr.io/ashtonian/argo-fleet-lovely-cmp
 
 jobs:
@@ -23,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
       packages: write
     steps:
@@ -55,6 +59,13 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
+      - name: Preserve Docker build record
+        if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        timeout-minutes: 5
+        uses: ashtonian/go-ci-actions/build-record@b9663a3e11da9a4d13f7832ed02e8e057ad9d70e # v1.4.0
+        with:
+          metadata: ${{ steps.build.outputs.metadata }}
+
       - name: Verify every platform
         env:
           REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
